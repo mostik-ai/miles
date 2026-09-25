@@ -573,6 +573,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
             )
             parser.add_argument(
+                "--log-probs-backend",
+                type=str,
+                choices=["torch", "fused"],
+                default="torch",
+                help=(
+                    "How per-token log-probs and entropy are computed from the logits. 'torch' upcasts each "
+                    "response chunk to fp32 and keeps the softmax for backward. 'fused' streams the logits "
+                    "with Triton kernels, keeps three numbers per token and writes the gradient in place, "
+                    "so no vocab-sized buffer outlives the loss. True-on-policy mode and sampling-support "
+                    "replay always use 'torch'."
+                ),
+            )
+            parser.add_argument(
                 "--indep-dp",
                 action="store_true",
                 default=False,

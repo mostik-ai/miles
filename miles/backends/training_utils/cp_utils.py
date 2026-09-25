@@ -368,7 +368,11 @@ def allgather_cp_redistribute(
             s = max(logit_global_start, chunk_start)
             e = min(logit_global_end, chunk_end)
 
-            if e <= s:
+            if e <= s and value.requires_grad:
+                # No response logprobs here, but the empty value is still an output of the
+                # log-prob op; padding it keeps the logits in the graph on this rank
+                full_resp = F.pad(value, (0, response_length))
+            elif e <= s:
                 # This rank has no response logprobs for this sample
                 full_resp = torch.zeros(
                     response_length,
