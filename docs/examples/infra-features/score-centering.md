@@ -66,7 +66,7 @@ For bounded sampling, the candidate arrays contain exactly the surviving tokens 
 
 Evaluation requests skip this collection and may use independent sampling settings, including greedy decoding. The built-in agentic producer marks evaluation sessions when creating them; custom session clients should create them with `POST /sessions` with JSON body `{"evaluation": true}`.
 
-For unfiltered session rollouts, more than 20 candidates require `--use-miles-router`. The SGLang Rust router caps OpenAI `top_logprobs` at 20, while MilesRouter forwards a larger request to SGLang unchanged. To use the SGLang router for unfiltered session rollouts, set `--score-centering-top-k 20` or less. Filtered rollouts request support probabilities instead of `top_logprobs` and do not use that cap. Native `/generate` rollouts support either router.
+Session rollouts with more than 20 candidates need an SGLang router build that accepts the requested OpenAI `top_logprobs` value and preserves `input_ids` and `return_meta_info`. Older builds cap `top_logprobs` at 20. Verify a chat request through the installed router before launching; for the default `k=128`, confirm that 128 candidate log probabilities reach the session server. Native `/generate` requests use `top_logprobs_num` and do not share that chat validation limit.
 
 Unused candidate slots and non-trained observation rows contain token ID `-1` and log probability `-inf`. Tool-observation masks, multi-turn merging, retries, trailing-token trimming, and truncation preserve row alignment. Session serialization and data-parallel sharding retain both arrays. Candidates stay on CPU until the trainer selects its context-parallel rows.
 
