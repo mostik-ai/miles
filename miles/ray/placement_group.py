@@ -359,9 +359,7 @@ async def _maybe_log_inference_engine_weight_checksums(
     }
     try:
         checked = await asyncio.wait_for(
-            _check_weights_until_answered(
-                inference_controller, model_id=trainer_model_id, cell_ids=sorted(published)
-            ),
+            _check_weights_until_answered(inference_controller, model_id=trainer_model_id, cell_ids=sorted(published)),
             timeout=args.update_weight_engine_request_timeout,
         )
         if not checked:
