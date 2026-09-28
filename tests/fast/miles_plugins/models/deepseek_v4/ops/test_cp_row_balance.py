@@ -12,11 +12,14 @@ from functools import partial
 import pytest
 import torch
 import torch.distributed as dist
-
 from tests.ci.ci_register import register_cpu_ci
 from tests.fast.dist_utils import init_gloo, run_multiprocess
 
-from miles_plugins.models.cp_row_balance import plan_causal_row_balance, scoring_rank_of_chunk, send_rows_to_scorers
+from miles_plugins.models.deepseek_v4.ops.cp_row_balance import (
+    plan_causal_row_balance,
+    scoring_rank_of_chunk,
+    send_rows_to_scorers,
+)
 
 register_cpu_ci(est_time=15, suite="stage-a-cpu", labels=[])
 

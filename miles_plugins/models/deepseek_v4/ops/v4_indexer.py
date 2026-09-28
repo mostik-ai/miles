@@ -8,14 +8,14 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from miles.utils.replay_base import indexer_replay_manager
-from miles_plugins.models.cp_row_balance import (
+from miles_plugins.models.deepseek_v4.ops.compressor import DeepSeekV4Compressor
+from miles_plugins.models.deepseek_v4.ops.cp_row_balance import (
     LocalRows,
     RowBalancePlan,
     RowExchange,
     plan_causal_row_balance,
     send_rows_to_scorers,
 )
-from miles_plugins.models.deepseek_v4.ops.compressor import DeepSeekV4Compressor
 from miles_plugins.models.deepseek_v4.ops.cp_utils import all_gather_cp, get_freqs_cis_for_cp, get_q_positions_for_cp
 from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import batched_indexer_fwd
 from miles_plugins.models.deepseek_v4.ops.qat import fp8_simulate_qat
@@ -142,7 +142,7 @@ class V4Indexer(MegatronModule):
         softmax_scale = self.index_head_dim**-0.5
         weights = (weights * (self.index_n_heads**-0.5) * softmax_scale).float()
 
-        # Balance the causal scoring work over contiguous CP (miles_plugins.models.cp_row_balance).
+        # Balance the causal scoring work over contiguous CP (cp_row_balance).
         # Replay data holds each rank's own rows, so replay scores them where they are.
         balance = cp_size > 1 and cp_group is not None and not indexer_replay_manager.enabled
         # started before the compressor to overlap it; unpacked, its CP all-gathers wait for the exchange

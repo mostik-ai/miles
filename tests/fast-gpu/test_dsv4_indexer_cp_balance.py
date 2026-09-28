@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 from tests.ci.ci_register import register_cuda_ci
 
-from miles_plugins.models.cp_row_balance import RowExchange
+from miles_plugins.models.deepseek_v4.ops.cp_row_balance import RowExchange
 from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import (
     _make_causal_cu_seqlens,
     batched_indexer_fwd,
