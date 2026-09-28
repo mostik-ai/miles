@@ -2,10 +2,11 @@
 
 The op's torch path shares the autograd function and the tensor-parallel combine with the Triton
 path, so these check the math, the gradient, the vocab-shard combine over a real gloo group, and
-that the losses and the all-gather-CP layout give the torch backend's results. The Triton kernels
+that the losses and the all-gather and zigzag CP layouts give the torch backend's results. The Triton kernels
 themselves are checked in tests/fast-gpu/test_fused_log_probs.py.
 """
 
+import dataclasses
 from functools import partial
 
 import pytest
@@ -79,6 +80,56 @@ def test_op_matches_log_softmax_and_its_gradient(dtype, temperature, entropy_req
     assert (leaf.grad[unscored] == 0).all()
 
 
+@pytest.mark.parametrize("used", ["log_probs", "entropy"])
+def test_a_single_used_output_gives_its_own_gradient(used):
+    """An output the loss does not read arrives in backward as None and adds nothing."""
+    logits, rows, targets = _logits_and_rows()
+    ref_leaf = logits.clone().requires_grad_(True)
+    ref_log_probs, ref_entropy = _reference(ref_leaf, rows, targets, 0.7)
+    (ref_log_probs if used == "log_probs" else ref_entropy).sum().backward()
+
+    leaf = logits.clone().requires_grad_(True)
+    log_probs, entropy = fused_log_probs_and_entropy(
+        leaf * 1, rows, targets, tp_group=None, temperature=0.7, with_entropy=True, inplace_backward=True
+    )
+    (log_probs if used == "log_probs" else entropy).sum().backward()
+    torch.testing.assert_close(leaf.grad, ref_leaf.grad, rtol=1e-5, atol=1e-5)
+
+
+def test_every_row_scored_matches_log_softmax():
+    """With every row scored there is nothing to zero, and the gradient still matches."""
+    logits, _, _ = _logits_and_rows()
+    rows = torch.arange(logits.size(0))
+    targets = torch.randint(0, VOCAB_SIZE, (rows.numel(),), generator=torch.Generator().manual_seed(1))
+    ref_leaf = logits.clone().requires_grad_(True)
+    _reference(ref_leaf, rows, targets, 1.0)[0].sum().backward()
+
+    leaf = logits.clone().requires_grad_(True)
+    log_probs, _ = fused_log_probs_and_entropy(leaf * 1, rows, targets, tp_group=None, inplace_backward=True)
+    log_probs.sum().backward()
+    torch.testing.assert_close(leaf.grad, ref_leaf.grad, rtol=1e-5, atol=1e-5)
+
+
+def test_inplace_backward_invalidates_the_logits():
+    """The in-place gradient overwrites the logits, so reading them again must fail loudly."""
+    logits, rows, targets = _logits_and_rows()
+    leaf = logits.clone().requires_grad_(True)
+    log_probs, _ = fused_log_probs_and_entropy(leaf * 1, rows, targets, tp_group=None, inplace_backward=True)
+    log_probs.sum().backward(retain_graph=True)
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        log_probs.sum().backward()
+
+
+def test_the_gradient_is_not_differentiable():
+    logits, rows, targets = _logits_and_rows()
+    leaf = logits.clone().requires_grad_(True)
+    log_probs, _ = fused_log_probs_and_entropy(leaf, rows, targets, tp_group=None)
+    # a squared loss makes the upstream gradient itself differentiable
+    (grad,) = torch.autograd.grad(log_probs.square().sum(), leaf, create_graph=True)
+    with pytest.raises(RuntimeError, match="once_differentiable"):
+        grad.sum().backward()
+
+
 def test_no_grad_returns_values_only():
     logits, rows, targets = _logits_and_rows()
     with torch.no_grad():
@@ -87,6 +138,13 @@ def test_no_grad_returns_values_only():
     torch.testing.assert_close(log_probs, ref_log_probs, rtol=1e-5, atol=1e-5)
     torch.testing.assert_close(entropy, ref_entropy, rtol=1e-5, atol=1e-5)
     assert log_probs.grad_fn is None
+
+    # the stored old log-probs come from this pass, so they must equal the training forward's bits
+    train_log_probs, train_entropy = fused_log_probs_and_entropy(
+        logits.clone().requires_grad_(True), rows, targets, tp_group=None, with_entropy=True
+    )
+    assert torch.equal(log_probs, train_log_probs.detach())
+    assert torch.equal(entropy, train_entropy.detach())
 
 
 def test_no_rows_still_gives_the_logits_a_gradient():
@@ -240,3 +298,47 @@ def _cp2_worker(rank, world_size, port, prompt_lens, response_lens):
 @pytest.mark.parametrize(("prompt_lens", "response_lens"), CP_CASES, ids=["split_responses", "empty_rank"])
 def test_allgather_cp2_matches_the_torch_backend(prompt_lens, response_lens):
     run_multiprocess(partial(_cp2_worker, prompt_lens=prompt_lens, response_lens=response_lens), world_size=2)
+
+
+# Zigzag CP=2 (thd): each sample is padded to 4 chunks and rank r holds chunks r and 3 - r. Rank 1
+# holds chunks 1 and 2 of the first sample (tokens 25-74 of 100), which lie wholly in its 90-token
+# prompt, so both of its halves score no response row.
+ZIGZAG_PROMPT_LENS, ZIGZAG_RESPONSE_LENS = [90, 10], [10, 30]
+
+
+@pytest.mark.parametrize("cp_rank", [0, 1])
+def test_zigzag_cp2_matches_the_torch_backend(process_group, cp_rank):
+    """Zigzag CP needs no collective to score its rows, so one process can stand in for each rank."""
+    set_parallel_state(dataclasses.replace(make_parallel_state(), cp=GroupInfo(rank=cp_rank, size=2, group=None)))
+    total_lens = [p + r for p, r in zip(ZIGZAG_PROMPT_LENS, ZIGZAG_RESPONSE_LENS, strict=True)]
+    local_rows = sum(2 * -(-total // 4) for total in total_lens)  # two chunks of ceil(total / 4) per sample
+    g = torch.Generator().manual_seed(cp_rank)
+    logits = torch.randn(1, local_rows, VOCAB_SIZE, generator=g) * 4
+    tokens = [torch.randint(0, VOCAB_SIZE, (total,), generator=g) for total in total_lens]
+
+    outputs = {}
+    for backend in ("torch", "fused"):
+        args = make_args(true_on_policy_mode=False, log_probs_backend=backend, rollout_temperature=0.8)
+        leaf = logits.clone().requires_grad_(True)
+        res = get_log_probs_and_entropy(
+            leaf * 1,
+            args=args,
+            unconcat_tokens=tokens,
+            total_lengths=total_lens,
+            response_lengths=ZIGZAG_RESPONSE_LENS,
+            with_entropy=True,
+        )
+        log_probs, entropy = torch.cat(res["log_probs"]), torch.cat(res["entropy"])
+        (log_probs.sum() + 0.1 * entropy.sum()).backward()
+        outputs[backend] = ([lp.numel() for lp in res["log_probs"]], log_probs.detach(), entropy.detach(), leaf.grad)
+
+    (torch_sizes, torch_lp, torch_ent, torch_grad), (fused_sizes, fused_lp, fused_ent, fused_grad) = (
+        outputs["torch"],
+        outputs["fused"],
+    )
+    assert fused_sizes == torch_sizes
+    if cp_rank == 1:
+        assert fused_sizes[0] == 0
+    torch.testing.assert_close(fused_lp, torch_lp, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(fused_ent, torch_ent, rtol=1e-5, atol=1e-5)
+    torch.testing.assert_close(fused_grad, torch_grad, **_TORCH_BACKEND_GRAD_TOL)

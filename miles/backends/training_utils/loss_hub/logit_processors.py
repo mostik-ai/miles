@@ -3,7 +3,7 @@ from collections.abc import Iterator, Sequence
 
 import torch
 
-from miles.backends.training_utils.cp_utils import allgather_cp_redistribute, get_logits_and_tokens_offset_with_cp
+from miles.backends.training_utils.cp_utils import allgather_cp_redistribute, iter_local_response_rows
 from miles.backends.training_utils.loss_hub.fused_log_probs import fused_log_probs_and_entropy
 from miles.backends.training_utils.loss_hub.math_utils import calculate_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
@@ -21,127 +21,6 @@ def _flatten_logits(logits: torch.Tensor, args: Namespace, max_seq_lens: list[in
     return logits.view(-1, logits.size(-1))
 
 
-def _iter_response_rows(
-    num_rows: int,
-    *,
-    args: Namespace,
-    unconcat_tokens: list[torch.Tensor],
-    total_lengths: list[int],
-    response_lengths: list[int],
-    max_seq_lens: list[int] | None = None,
-    include_response_indices: bool,
-) -> Iterator[tuple[tuple[tuple[int, int], ...], torch.Tensor, Sequence[int]]]:
-    """Yield, per sample, the rows of the flattened logits that score its response tokens.
-
-    When context parallelism is disabled, a response occupies one run of the concatenated sequence.
-    With context parallelism, this rank holds part of it: one run under all-gather CP, two runs
-    (the zigzag halves) otherwise.
-
-    Args:
-        num_rows: rows of the flattened ``[rows, V]`` logits on this rank.
-        args: Configuration (``qkv_format``, ``allgather_cp``).
-        unconcat_tokens: List of token tensors (prompt+response) per sample.
-        total_lengths: Total sequence lengths (prompt+response) per sample.
-        response_lengths: Response segment lengths per sample.
-
-    Yields:
-        Tuple of `(row_ranges, tokens_chunk, response_indices)`: half-open `(start, end)` row runs
-        in order, whose rows score `tokens_chunk` (1D int64) one to one. `response_indices` maps
-        every local row back to the full response; it is empty when `include_response_indices`
-        is false.
-    """
-    qkv_format = args.qkv_format
-    parallel_state = get_parallel_state()
-    cp_size = parallel_state.cp.size
-    end = 0
-    seq_start = 0
-    for i, (tokens, total_length, response_length) in enumerate(
-        zip(unconcat_tokens, total_lengths, response_lengths, strict=False)
-    ):
-        max_seq_len = max_seq_lens[i] if max_seq_lens is not None else None
-
-        if cp_size == 1:
-            if qkv_format == "bshd":
-                end = max_seq_len * i + total_length
-            else:
-                end += total_length
-            start = end - response_length
-            row_ranges = ((start - 1, end - 1),)
-            tokens_chunk = tokens[-response_length:] if response_length else tokens[0:0]
-            response_indices = range(response_length) if include_response_indices else ()
-        elif args.allgather_cp:
-            # DSA: global concat then contiguous CP split. Each rank owns logits for
-            # global positions [chunk_start, chunk_end).
-            chunk_start = parallel_state.cp.rank * num_rows
-            chunk_end = chunk_start + num_rows
-
-            prompt_length = total_length - response_length
-            resp_token_start = seq_start + prompt_length
-            resp_token_end = seq_start + total_length
-            logit_global_start = resp_token_start - 1
-            logit_global_end = resp_token_end - 1
-
-            s = max(logit_global_start, chunk_start)
-            e = min(logit_global_end, chunk_end)
-            if e <= s:
-                row_ranges = ((0, 0),)
-                tokens_chunk = tokens[0:0]
-                response_indices = ()
-            else:
-                row_ranges = ((s - chunk_start, e - chunk_start),)
-                tokens_chunk = tokens[(s + 1) - seq_start : (e + 1) - seq_start]
-                response_indices = (
-                    range(
-                        s - logit_global_start,
-                        e - logit_global_start,
-                    )
-                    if include_response_indices
-                    else ()
-                )
-        else:
-            # TODO: this is super ugly... do better abstraction.
-            chunk_size, chunks_offset, logits_offset, tokens_offset = get_logits_and_tokens_offset_with_cp(
-                total_length, response_length, qkv_format, max_seq_len
-            )
-
-            row_ranges = tuple(
-                (
-                    base + logits_offset[half][0] - chunks_offset[half][0],
-                    base + logits_offset[half][1] - chunks_offset[half][0],
-                )
-                for half, base in enumerate((end, end + chunk_size))
-            )
-            end += 2 * chunk_size
-
-            tokens_0 = tokens[tokens_offset[0][0] : tokens_offset[0][1]]
-            tokens_1 = tokens[tokens_offset[1][0] : tokens_offset[1][1]]
-            for (row_start, row_end), tokens_half in zip(row_ranges, (tokens_0, tokens_1), strict=True):
-                assert row_end - row_start == tokens_half.size(0), f"{row_end - row_start} vs {tokens_half.size(0)}"
-
-            tokens_chunk = torch.cat([tokens_0, tokens_1], dim=0)
-            if include_response_indices:
-                prompt_length = total_length - response_length
-                response_indices = [
-                    *range(
-                        tokens_offset[0][0] - prompt_length,
-                        tokens_offset[0][1] - prompt_length,
-                    ),
-                    *range(
-                        tokens_offset[1][0] - prompt_length,
-                        tokens_offset[1][1] - prompt_length,
-                    ),
-                ]
-            else:
-                response_indices = ()
-
-        seq_start += total_length
-
-        assert sum(row_end - row_start for row_start, row_end in row_ranges) == tokens_chunk.size(0)
-        if include_response_indices:
-            assert len(response_indices) == tokens_chunk.size(0)
-        yield row_ranges, tokens_chunk, response_indices
-
-
 def _iter_response_chunks(
     logits: torch.Tensor,
     *,
@@ -156,7 +35,7 @@ def _iter_response_chunks(
 
     After squeezing batch dimension and applying temperature scaling, this
     function extracts the logits and tokens corresponding to response segments
-    for each sample (see ``_iter_response_rows`` for the row layout).
+    for each sample (``cp_utils.iter_local_response_rows`` owns the row layout).
 
     Args:
         logits: Model outputs with shape `[1, T, V]` (policy) or `[1, T, 1]`
@@ -186,9 +65,10 @@ def _iter_response_chunks(
         elif getattr(args, "fp16", False):
             logits = logits.to(torch.float16)
 
-    for row_ranges, tokens_chunk, response_indices in _iter_response_rows(
+    for row_ranges, tokens_chunk, response_indices in iter_local_response_rows(
         logits.size(0),
-        args=args,
+        qkv_format=args.qkv_format,
+        allgather_cp=args.allgather_cp,
         unconcat_tokens=unconcat_tokens,
         total_lengths=total_lengths,
         response_lengths=response_lengths,
@@ -379,9 +259,10 @@ def _fused_log_probs_and_entropy(
     """All samples' response rows through one ``fused_log_probs_and_entropy`` call."""
     flat_logits = _flatten_logits(logits, args, max_seq_lens)
     row_ranges, targets, lengths = [], [], []
-    for sample_ranges, tokens_chunk, _ in _iter_response_rows(
+    for sample_ranges, tokens_chunk, _ in iter_local_response_rows(
         flat_logits.size(0),
-        args=args,
+        qkv_format=args.qkv_format,
+        allgather_cp=args.allgather_cp,
         unconcat_tokens=unconcat_tokens,
         total_lengths=total_lengths,
         response_lengths=response_lengths,
@@ -391,7 +272,6 @@ def _fused_log_probs_and_entropy(
         row_ranges.extend(sample_ranges)
         targets.append(tokens_chunk)
         lengths.append(tokens_chunk.size(0))
-    assert all(row_start >= 0 for row_start, _ in row_ranges), f"negative logits row in {row_ranges}"
     device = flat_logits.device
     rows = torch.cat([torch.arange(row_start, row_end, device=device) for row_start, row_end in row_ranges])
     log_probs, entropy = fused_log_probs_and_entropy(

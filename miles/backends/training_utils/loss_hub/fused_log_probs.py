@@ -3,8 +3,8 @@
 Every Miles loss reads the policy through the log-probability of each sampled token, plus an
 optional entropy term (``get_log_probs_and_entropy``). The unfused path copies each response chunk
 to fp32 and keeps the fused cross-entropy's fp32 softmax alive until backward; an entropy gradient
-keeps another fp32 copy and softmax. At 128K tokens per rank that is about 95 GiB for the
-log-probs alone.
+keeps another fp32 copy and softmax. At the 128K-decode shape (``[65536, 129280]`` bf16 logits on
+one rank) that is 63 GiB for the log-probs and 79 GiB with an entropy gradient.
 
 This op streams each selected row once and keeps three fp32 numbers per row: the log-sum-exp, the
 target logit and the softmax mean of the logits. Tensor-parallel ranks combine them with one max
@@ -18,6 +18,12 @@ entropy, and ``mu`` is the softmax mean of ``z``. With ``inplace_backward`` it w
 logits buffer itself and zeroes the rows it did not score, so the backward allocates nothing of
 vocab size.
 
+The no-grad scoring passes (reference, old actor, teacher) call the same autograd function, like
+every other Miles op: under ``torch.no_grad`` autograd keeps nothing, and the pass runs the
+training forward's statistics kernel, so the stored old log-probs match the training forward bit
+for bit. With more than two tensor-parallel ranks that holds up to the all-reduce: NCCL may add the
+shards in another order when the two passes send different row counts.
+
 CUDA tensors use the Triton kernels in ``fused_log_probs_triton``; CPU tensors use the same math in
 torch, which keeps the autograd and tensor-parallel logic testable without a GPU.
 """
@@ -25,8 +31,7 @@ torch, which keeps the autograd and tensor-parallel logic testable without a GPU
 import torch
 import torch.distributed as dist
 from torch import Tensor
-
-_NO_ENTROPY, _ENTROPY_METRIC, _ENTROPY_WITH_GRAD = 0, 1, 2
+from torch.autograd.function import once_differentiable
 
 
 def fused_log_probs_and_entropy(
@@ -61,36 +66,43 @@ def fused_log_probs_and_entropy(
     temperature = float(temperature) if temperature > 0 else 1.0
     rows, targets = rows.long(), targets.long()
 
-    if not (torch.is_grad_enabled() and logits.requires_grad):
-        lse, target_logit, mu = _row_statistics(logits, rows, targets, tp_group, temperature, with_entropy)
-        return target_logit - lse, (lse - mu if with_entropy else None)
-
-    mode = _NO_ENTROPY if not with_entropy else (_ENTROPY_WITH_GRAD if entropy_requires_grad else _ENTROPY_METRIC)
     log_probs, entropy = _FusedLogProbsAndEntropy.apply(
-        logits, rows, targets, tp_group, temperature, mode, inplace_backward
+        logits,
+        rows,
+        targets,
+        tp_group,
+        temperature,
+        with_entropy,
+        with_entropy and entropy_requires_grad,
+        inplace_backward,
     )
     return log_probs, (entropy if with_entropy else None)
 
 
 class _FusedLogProbsAndEntropy(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, logits, rows, targets, tp_group, temperature, mode, inplace_backward):
-        lse, target_logit, mu = _row_statistics(logits, rows, targets, tp_group, temperature, mode != _NO_ENTROPY)
+    def forward(
+        ctx, logits, rows, targets, tp_group, temperature, with_entropy, entropy_requires_grad, inplace_backward
+    ):
+        lse, target_logit, mu = _row_statistics(logits, rows, targets, tp_group, temperature, with_entropy)
         log_probs = target_logit - lse
-        entropy = lse - mu if mode != _NO_ENTROPY else lse.new_empty(0)
-        if mode != _ENTROPY_WITH_GRAD:
+        entropy = lse - mu if with_entropy else lse.new_empty(0)
+        if not entropy_requires_grad:
             ctx.mark_non_differentiable(entropy)
-        ctx.save_for_backward(logits, rows, targets, lse, mu if mode == _ENTROPY_WITH_GRAD else None)
+        # an output the loss does not use arrives as None, so the backward skips its term
+        ctx.set_materialize_grads(False)
+        ctx.save_for_backward(logits, rows, targets, lse, mu if entropy_requires_grad else None)
         ctx.tp_group = tp_group
         ctx.temperature = temperature
-        ctx.mode = mode
+        ctx.entropy_requires_grad = entropy_requires_grad
         ctx.inplace_backward = inplace_backward
         return log_probs, entropy
 
     @staticmethod
+    @once_differentiable
     def backward(ctx, grad_log_probs, grad_entropy):
         logits, rows, targets, lse, mu = ctx.saved_tensors
-        if ctx.mode != _ENTROPY_WITH_GRAD:
+        if not ctx.entropy_requires_grad:
             grad_entropy = None
         grad = logits if ctx.inplace_backward else torch.empty_like(logits)
         _write_logits_grad(
@@ -105,10 +117,12 @@ class _FusedLogProbsAndEntropy(torch.autograd.Function):
             vocab_start=_vocab_start(logits, ctx.tp_group),
             temperature=ctx.temperature,
         )
-        scored = torch.zeros(logits.size(0), dtype=torch.bool, device=logits.device)
-        scored[rows] = True
-        grad.masked_fill_(~scored.unsqueeze(1), 0)
-        return grad, None, None, None, None, None, None
+        _zero_unscored_rows(grad, rows)
+        if ctx.inplace_backward:
+            # the kernels write through raw pointers; bump the version so a second reader of these
+            # logits (e.g. a retained graph) fails loudly instead of reading the gradient
+            torch.autograd.graph.increment_version(logits)
+        return grad, None, None, None, None, None, None, None
 
 
 def _row_statistics(logits, rows, targets, tp_group, temperature, with_entropy):
@@ -173,6 +187,19 @@ def _write_logits_grad(
         vocab_start=vocab_start,
         temperature=temperature,
     )
+
+
+def _zero_unscored_rows(grad, rows):
+    if rows.numel() == grad.size(0):  # rows are unique, so every row was scored
+        return
+    if grad.is_cuda:
+        from miles.backends.training_utils.loss_hub import fused_log_probs_triton  # needs triton
+
+        fused_log_probs_triton.zero_unscored_rows(grad, rows)
+        return
+    unscored = torch.ones(grad.size(0), dtype=torch.bool, device=grad.device)
+    unscored[rows] = False
+    grad[unscored] = 0
 
 
 def _row_statistics_torch(logits, rows, targets, *, vocab_start, temperature, with_entropy):

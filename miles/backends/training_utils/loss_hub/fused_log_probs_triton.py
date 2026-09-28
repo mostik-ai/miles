@@ -4,16 +4,59 @@ Both kernels read one vocab shard of selected logits rows, in the logits' own dt
 arithmetic in fp32. To keep the exponential off the critical path they work in base 2
 (``y = z * log2(e)``, one ``exp2`` per element), multiply by the reciprocal temperature instead of
 dividing, and the statistics kernel rescales its running sums once per block, not per element.
+
+A third, store-only kernel zeroes the gradient rows the op did not score, so the backward never
+reads or rewrites the scored rows a second time.
+
+All three are memory-bound streaming passes, so their launch shape (vocab block and warps) is the
+only thing to tune per GPU; ``kernel_configs`` picks it by GPU family.
 """
+
+import functools
+from dataclasses import dataclass
 
 import torch
 import triton
 import triton.language as tl
 
-# Measured on B300 at [65536, 129280] bf16: the statistics kernel reads at the speed of torch's own
-# row reduction (4.2 TB/s) and the gradient kernel moves 6.1 TB/s, 92% of a device copy.
-_STATS_BLOCK_V, _STATS_NUM_WARPS = 2048, 2
-_GRAD_BLOCK_V, _GRAD_NUM_WARPS = 2048, 4
+
+@dataclass(frozen=True)
+class LaunchConfig:
+    """Vocab elements per block and warps per program for one kernel."""
+
+    block_v: int
+    num_warps: int
+
+
+@dataclass(frozen=True)
+class KernelConfigs:
+    stats: LaunchConfig
+    grad: LaunchConfig
+    zero: LaunchConfig
+
+
+# Measured at [65536, 129280] bf16 with tests/manual/bench_fused_log_probs.py, which prints the row
+# for the GPU it runs on. On B300 the statistics kernel reads at torch's own row-reduction speed
+# (4.2 TB/s) and the gradient kernel moves 6.1 TB/s, 92% of a device copy.
+_MEASURED_CONFIGS = {
+    "sm103": KernelConfigs(stats=LaunchConfig(2048, 2), grad=LaunchConfig(2048, 4), zero=LaunchConfig(2048, 4)),
+}
+# A family nobody has measured yet (sm90: H100, H200; sm100: B200, GB200; gfx942: MI300X; gfx950:
+# MI350X, MI355X) runs the B300 shape: every shape gives the same results, only the speed differs.
+_FALLBACK_CONFIGS = _MEASURED_CONFIGS["sm103"]
+
+
+def gpu_family(device: torch.device) -> str:
+    """``sm<major><minor>`` on NVIDIA (sm90, sm100, sm103), the gfx architecture on ROCm."""
+    props = torch.cuda.get_device_properties(device)
+    if torch.version.hip is not None:
+        return props.gcnArchName.split(":")[0]
+    return f"sm{props.major}{props.minor}"
+
+
+@functools.cache
+def kernel_configs(device: torch.device) -> KernelConfigs:
+    return _MEASURED_CONFIGS.get(gpu_family(device), _FALLBACK_CONFIGS)
 
 
 @triton.jit
@@ -105,8 +148,29 @@ def _logits_grad_kernel(
     tl.store(grad_ptr + row * grad_stride_row + cols, grad.to(grad_ptr.dtype.element_ty), mask=in_vocab)
 
 
-def row_statistics(logits, rows, targets, *, vocab_start: int, temperature: float, with_entropy: bool):
+@triton.jit
+def _zero_unscored_rows_kernel(grad_ptr, scored_ptr, grad_stride_row, n_vocab, BLOCK_V: tl.constexpr):
+    row = tl.program_id(0).to(tl.int64)
+    if tl.load(scored_ptr + row) == 0:
+        row_ptr = grad_ptr + row * grad_stride_row
+        zeros = tl.zeros([BLOCK_V], grad_ptr.dtype.element_ty)
+        for start in range(0, n_vocab, BLOCK_V):
+            cols = start + tl.arange(0, BLOCK_V)
+            tl.store(row_ptr + cols, zeros, mask=cols < n_vocab)
+
+
+def row_statistics(
+    logits,
+    rows,
+    targets,
+    *,
+    vocab_start: int,
+    temperature: float,
+    with_entropy: bool,
+    launch: LaunchConfig | None = None,
+):
     """This shard's ``(max, sum exp(z - max), sum exp(z - max) * z or None, target z or 0)`` per row."""
+    launch = launch or kernel_configs(logits.device).stats
     n_rows = rows.numel()
     stats = torch.empty((4, n_rows), dtype=torch.float32, device=logits.device)
     if n_rows:
@@ -123,21 +187,33 @@ def row_statistics(logits, rows, targets, *, vocab_start: int, temperature: floa
             vocab_start,
             1.0 / temperature,
             WITH_ENTROPY=with_entropy,
-            BLOCK_V=_STATS_BLOCK_V,
-            num_warps=_STATS_NUM_WARPS,
+            BLOCK_V=launch.block_v,
+            num_warps=launch.num_warps,
         )
     row_max, row_sum, row_zsum, target_logit = stats
     return row_max, row_sum, (row_zsum if with_entropy else None), target_logit
 
 
 def write_logits_grad(
-    grad, logits, rows, targets, lse, mu, grad_log_probs, grad_entropy, *, vocab_start: int, temperature: float
+    grad,
+    logits,
+    rows,
+    targets,
+    lse,
+    mu,
+    grad_log_probs,
+    grad_entropy,
+    *,
+    vocab_start: int,
+    temperature: float,
+    launch: LaunchConfig | None = None,
 ):
     """Write the gradient of the selected rows into ``grad``; ``grad`` may be ``logits`` itself."""
+    launch = launch or kernel_configs(logits.device).grad
     n_rows = rows.numel()
     if not n_rows:
         return
-    grid = (n_rows, triton.cdiv(logits.size(1), _GRAD_BLOCK_V))
+    grid = (n_rows, triton.cdiv(logits.size(1), launch.block_v))
     _logits_grad_kernel[grid](
         logits,
         grad,
@@ -154,6 +230,17 @@ def write_logits_grad(
         1.0 / temperature,
         HAS_GRAD_LOG_PROBS=grad_log_probs is not None,
         HAS_GRAD_ENTROPY=grad_entropy is not None,
-        BLOCK_V=_GRAD_BLOCK_V,
-        num_warps=_GRAD_NUM_WARPS,
+        BLOCK_V=launch.block_v,
+        num_warps=launch.num_warps,
+    )
+
+
+def zero_unscored_rows(grad, rows, *, launch: LaunchConfig | None = None):
+    """Zero the rows of ``grad`` that are not in ``rows``, writing only those rows."""
+    launch = launch or kernel_configs(grad.device).zero
+    n_rows = grad.size(0)
+    scored = torch.zeros(n_rows, dtype=torch.uint8, device=grad.device)
+    scored[rows] = 1
+    _zero_unscored_rows_kernel[(n_rows,)](
+        grad, scored, grad.stride(0), grad.size(1), BLOCK_V=launch.block_v, num_warps=launch.num_warps
     )
