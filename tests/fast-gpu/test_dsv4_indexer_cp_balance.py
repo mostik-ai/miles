@@ -66,7 +66,9 @@ def _inputs(rank, rank_rows, n_kv, bsz):
 
 def _thd_layout(seq_lens, rank, rank_rows):
     cu_seqlens = torch.tensor([0, *torch.tensor(seq_lens).cumsum(0).tolist()], device="cuda", dtype=torch.int32)
-    layout = ThdLayout(cu_seqlens=cu_seqlens, global_start=rank * rank_rows, max_seqlen=max(seq_lens))
+    layout = ThdLayout(
+        cu_seqlens=cu_seqlens, seq_lens=tuple(seq_lens), global_start=rank * rank_rows, max_seqlen=max(seq_lens)
+    )
     layout.cu_seqlens_compressed = compressed_cu_seqlens(cu_seqlens, RATIO)
     return layout
 

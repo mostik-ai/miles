@@ -152,7 +152,10 @@ def _concat_ranges(starts: list[int], lengths: list[int], device: torch.device |
     """
     starts_t, lengths_t = torch.tensor([starts, lengths], dtype=torch.int64)
     total = int(lengths_t.sum())
-    base, lengths_t = torch.stack([starts_t - (torch.cumsum(lengths_t, 0) - lengths_t), lengths_t]).to(device)
+    table = torch.stack([starts_t - (torch.cumsum(lengths_t, 0) - lengths_t), lengths_t])
+    if torch.device(device).type == "cuda":
+        table = table.pin_memory()  # a copy from pageable memory would wait for the stream to drain
+    base, lengths_t = table.to(device, non_blocking=True)
     return base.repeat_interleave(lengths_t, output_size=total) + torch.arange(total, device=device)
 
 

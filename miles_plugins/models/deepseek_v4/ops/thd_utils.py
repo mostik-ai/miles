@@ -11,6 +11,7 @@ absolute, so the KV layout is unchanged.
 """
 
 from dataclasses import dataclass
+from itertools import pairwise
 
 import torch
 import torch.distributed as dist
@@ -21,12 +22,14 @@ from torch import Tensor
 class ThdLayout:
     """How this rank's packed stream is laid out; ``None`` stands for the unpacked one.
 
-    The first three fields come from the packed sequence parameters. The rest are filled in as
+    The first four fields come from the packed sequence parameters; ``seq_lens`` holds the
+    segment lengths on the host, so reading them costs no device sync. The rest are filled in as
     the forward runs: ``cu_seqlens_compressed`` before the compressor is called, and the
     compaction ones only under CP, where a compressed group can straddle the split.
     """
 
     cu_seqlens: Tensor
+    seq_lens: tuple[int, ...]
     global_start: int
     max_seqlen: int
     hidden_compact: Tensor | None = None
@@ -39,22 +42,14 @@ class ThdLayout:
         """This rank's layout, or None for any format other than thd."""
         if packed_seq_params is None or packed_seq_params.qkv_format != "thd":
             return None
+        cu_seqlens_host = packed_seq_params.cu_seqlens_host
         return cls(
             cu_seqlens=packed_seq_params.cu_seqlens_q,
+            seq_lens=tuple(end - start for start, end in pairwise(cu_seqlens_host)),
             # CP splits the packed stream contiguously, so this rank's rows start here globally.
             global_start=cp_rank * seqlen_local,
             max_seqlen=packed_seq_params.max_seqlen_q,
         )
-
-
-def host_segment_lengths(cu_seqlens: Tensor, total_rows: int) -> tuple[int, ...]:
-    """Segment lengths on the host, tiling ``total_rows``; costs a device sync.
-
-    Rows past ``cu_seqlens[-1]`` belong to the last segment, as in ``batch_of_row``.
-    """
-    seq_lens = torch.diff(cu_seqlens).tolist()
-    seq_lens[-1] += total_rows - sum(seq_lens)
-    return tuple(seq_lens)
 
 
 def batch_of_row(cu_seqlens: Tensor, total_rows: int, global_start: int = 0) -> Tensor:

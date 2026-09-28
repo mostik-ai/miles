@@ -26,7 +26,6 @@ from miles_plugins.models.deepseek_v4.ops.thd_utils import (
     get_compress_cu_seqlens_thd,
     get_compress_topk_idxs_thd,
     get_window_topk_idxs_thd,
-    host_segment_lengths,
     to_rank_major_rows,
 )
 
@@ -256,9 +255,3 @@ def test_compress_bounds_follow_the_position_not_the_row(ratio, shape):
     positions = torch.randperm(total, generator=torch.Generator().manual_seed(0))
     got_ks, got_ke = compress_bounds_at_positions(cu, cu_comp, positions, ratio=ratio)
     assert torch.equal(got_ks, ks[positions]) and torch.equal(got_ke, ke[positions])
-
-
-def test_host_segment_lengths_give_trailing_rows_to_the_last_segment():
-    """Rows past cu_seqlens[-1] belong to the last segment, as in batch_of_row."""
-    assert host_segment_lengths(_cu([1536, 512, 7]), 2056) == (1536, 512, 8)
-    assert host_segment_lengths(_cu([2056]), 2056) == (2056,)

@@ -6,7 +6,6 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
-from torch.utils.weak import WeakIdKeyDictionary
 
 from miles.utils.replay_base import indexer_replay_manager
 from miles_plugins.models.cp_row_balance import (
@@ -21,12 +20,7 @@ from miles_plugins.models.deepseek_v4.ops.cp_utils import all_gather_cp, get_fre
 from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import batched_indexer_fwd
 from miles_plugins.models.deepseek_v4.ops.qat import fp8_simulate_qat
 from miles_plugins.models.deepseek_v4.ops.rope import apply_rotary_emb, wrapped_precompute_freqs_cis
-from miles_plugins.models.deepseek_v4.ops.thd_utils import (
-    ThdLayout,
-    compress_bounds_at_positions,
-    get_q_positions_thd,
-    host_segment_lengths,
-)
+from miles_plugins.models.deepseek_v4.ops.thd_utils import ThdLayout, compress_bounds_at_positions, get_q_positions_thd
 from miles_plugins.models.deepseek_v4.ops.utils import rotate_activation
 from miles_plugins.models.dsa_topk import get_dsa_topk_fn
 
@@ -244,19 +238,7 @@ def _row_balance_plan(seqlen_local, thd_layout, cp_group, device) -> RowBalanceP
     """This micro-batch's balanced exchange; every CP rank derives the same one."""
     cp_size = cp_group.size()
     total_rows = seqlen_local * cp_size
-    if thd_layout is None:
-        seq_lens = (total_rows,)  # each batch row of an unpacked sample is one sequence
-    else:
-        seq_lens = _host_seq_lens(thd_layout.cu_seqlens, total_rows)
+    # each batch row of an unpacked sample is one sequence
+    seq_lens = (total_rows,) if thd_layout is None else thd_layout.seq_lens
+    assert sum(seq_lens) == total_rows, f"segment lengths cover {sum(seq_lens)} rows of a {total_rows}-row stream"
     return plan_causal_row_balance(seq_lens, cp_rank=cp_group.rank(), cp_size=cp_size, device=device)
-
-
-# a micro-batch's segment lengths on the host, keyed by the cu_seqlens tensor every layer shares
-_HOST_SEQ_LENS = WeakIdKeyDictionary()
-
-
-def _host_seq_lens(cu_seqlens: torch.Tensor, total_rows: int) -> tuple[int, ...]:
-    """The lengths behind ``cu_seqlens``, copied to the host once per micro-batch rather than per layer."""
-    if cu_seqlens not in _HOST_SEQ_LENS:
-        _HOST_SEQ_LENS[cu_seqlens] = host_segment_lengths(cu_seqlens, total_rows)
-    return _HOST_SEQ_LENS[cu_seqlens]
