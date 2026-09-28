@@ -150,8 +150,6 @@ These are the validated layouts shipped with the launcher; All parallelisms are 
 
 The Nodes × GPUs column counts **actor (training) nodes** — in disaggregated mode (see [§3.3](#33-colocated-vs-disaggregated-rollout)) rollout nodes come on top of these.
 
-On a single node, `--dsv4-impl miles` also takes `--cp-size` (default 1): TP takes the GPUs CP leaves, and `--cp-size > 1` adds `--allgather-cp`. The other recipes run their own CP size and reject another.
-
 ### 5.2 Algorithm
 
 Using GRPO as an example, you can configure the algorithm with the following flags:
