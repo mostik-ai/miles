@@ -238,7 +238,6 @@ def _row_balance_plan(seqlen_local, thd_layout, cp_group, device) -> RowBalanceP
     cp_rank, cp_size = cp_group.rank(), cp_group.size()
     if thd_layout is None:
         return _unpacked_row_balance_plan(seqlen_local * cp_size, cp_rank, cp_size, str(device))
-    # The first CSA layer of a micro-batch builds it, right after the host sync for the lengths.
     key = ("row_balance_plan", seqlen_local)
     cache = thd_layout.micro_batch_cache
     if key not in cache:

@@ -1,24 +1,10 @@
 """Balance causal per-row work across contiguous context-parallel ranks.
 
-A causal indexer (the DSA/NSA lightning indexer, DeepSeek-V4's CSA indexer) scores every key
-before each query, so a row's cost grows with its position inside its own sequence. Under
-contiguous CP, rank r holds rows [r * L, (r + 1) * L) of the packed stream; for one long sequence
-the last rank then does about (2 * cp - 1) / cp of the mean work, and the others wait for it.
-
-Balancing moves only the rows being scored, never the layout. Every sequence is cut into
-2 * cp near-equal chunks; rank r scores chunks 2r and 2 * cp - 1 - 2r of each one, an early chunk
-paired with a late one. For a stream holding one sequence, rank r keeps its own first half and
-swaps its second half with rank cp - 1 - r, so the exchange is a single pairwise swap. Every rank
-derives the same plan from the global sequence lengths, so no metadata travels; a plan is used
-only when it lowers the busiest rank's work by ``min_gain``, since a pack of many short documents
-is already balanced under contiguous CP and moving it would only add traffic.
-
-A caller starts the exchange with ``send_rows_to_scorers``, which returns at once so it can overlap
-other work, scores the rows at ``plan.scored_positions`` once ``RowExchange.wait()`` hands them
-over, and sends the results back with ``RowExchange.return_to_owners``. Each input travels in its
-own all-to-all straight into the buffer the scorer reads, so a row is copied once on the way out
-and never on the way in. The exchange carries no autograd: it is for work whose output is
-selection indices, and it rejects inputs that require grad.
+Every sequence is cut into 2 * cp chunks and rank r scores chunks 2r and 2 * cp - 1 - 2r, pairing an
+early chunk with a late one; for one sequence the exchange is a single pairwise swap. Every rank
+derives the same plan from the global sequence lengths. ``send_rows_to_scorers`` starts the
+exchange, ``wait()`` hands over the rows at ``scored_positions`` and ``return_to_owners`` sends the
+results back; ``LocalRows`` is the same interface without an exchange. Nothing carries autograd.
 """
 
 from dataclasses import dataclass
