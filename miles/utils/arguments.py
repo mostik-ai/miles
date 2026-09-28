@@ -955,6 +955,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-parameter-scope",
+                choices=["all", "trainable"],
+                default="all",
+                help=(
+                    "Which trainer parameters a weight sync sends to the rollout engines. "
+                    "'all' (the default) sends every base weight. 'trainable' sends only the update "
+                    "units that came from parameters with requires_grad, so a frozen part of the model "
+                    "(a frozen backbone or tower, the frozen side of a composite) never crosses the "
+                    "trainer-to-engine boundary after startup. Engines load the partial set through "
+                    "their ordinary weight-load path; HF snapshot publication stays complete."
+                ),
+            )
+            parser.add_argument(
                 "--update-weights-interval",
                 type=int,
                 default=1,
@@ -3595,6 +3608,21 @@ def miles_validate_args(args):
         assert os.path.isdir(args.hf_checkpoint), (
             "--update-weight-transfer-mode=disk-delta requires --hf-checkpoint to be a local directory: "
             "the baseline snapshot is seeded from its safetensors bytes."
+        )
+
+    if args.update_weight_parameter_scope == "trainable":
+        # The selection is made where the exported units carry their Megatron source parameters.
+        assert args.train_backend == "megatron" and getattr(args, "megatron_to_hf_mode", None) == "bridge", (
+            "--update-weight-parameter-scope trainable requires --train-backend megatron with "
+            "--megatron-to-hf-mode bridge; no other exporter reports the source of an update unit."
+        )
+        assert args.lora_rank <= 0, (
+            "--update-weight-parameter-scope trainable is for a partially frozen base model. LoRA "
+            "adapter sync already sends adapters only; combining the two would drop them."
+        )
+        assert not args.check_weight_update_equal, (
+            "--check-weight-update-equal compares the engines against the full trainer state, which "
+            "a trainable-only sync deliberately no longer sends."
         )
 
     if args.colocate:

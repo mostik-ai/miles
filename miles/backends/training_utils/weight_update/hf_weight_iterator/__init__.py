@@ -14,6 +14,10 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator.bucketing im
     assemble_atomic_update_groups,
     pack_units_by_size,
 )
+from miles.backends.training_utils.weight_update.hf_weight_iterator.trainable_scope import (
+    PARAMETER_SCOPES,
+    select_trainable_units,
+)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -68,12 +72,21 @@ class HfWeightIteratorBase(ABC):
         placement: WeightUpdatePlacement,
         model_name: str,
         quantization_config: dict | None,
+        parameter_scope: str = "all",
     ) -> None:
+        assert parameter_scope in PARAMETER_SCOPES, f"Unknown parameter scope {parameter_scope!r}"
         self.args = args
         self.model = model
         self.placement = placement
         self.model_name = model_name
         self.quantization_config = quantization_config
+        # Which parameters a sync sends: "all", or "trainable" for the requires_grad ones only.
+        # Live syncs opt in; a snapshot publisher keeps the default and stays complete.
+        self.parameter_scope = parameter_scope
+        # HF names the backend sourced from trainable parameters in the current export. A backend
+        # that supports the "trainable" scope fills it while yielding units, so whole units — and
+        # whole atomic groups — can be selected after assembly.
+        self.trainable_hf_names: set[str] = set()
 
     def iter_hf_weights(
         self,
@@ -89,8 +102,13 @@ class HfWeightIteratorBase(ABC):
         ``weights``: backend-native named weights to read; None reads the live
         model parameters. ``adapters``: ``(lora_name, adapter_or_None)`` pairs
         whose tensors join the stream under ``{lora_name}:{hf_key}`` names.
-        ``materialize=False`` joins every collective but yields nothing.
+        ``materialize=False`` joins every collective but yields nothing. Under
+        ``parameter_scope="trainable"`` only the units a backend sourced from
+        trainable parameters are yielded; the collectives run either way.
         """
+
+        # Per export: a parameter frozen since the last sync must not stay selected.
+        self.trainable_hf_names.clear()
 
         def prefixed_units(lora_name, adapter):
             for unit in self._iter_hf_adapter_units(adapter, materialize=materialize):
@@ -101,6 +119,8 @@ class HfWeightIteratorBase(ABC):
             hf_param_units = itertools.chain(hf_param_units, prefixed_units(lora_name, adapter))
         atomic_update_groups = self._hf_atomic_update_groups() if include_base and materialize else []
         hf_param_units = assemble_atomic_update_groups(hf_param_units, atomic_update_groups)
+        if include_base and materialize and self.parameter_scope == "trainable":
+            hf_param_units = select_trainable_units(hf_param_units, self.trainable_hf_names)
         yield from pack_units_by_size(hf_param_units, self.args.update_weight_buffer_size)
 
     @abstractmethod

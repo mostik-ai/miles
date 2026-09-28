@@ -66,7 +66,7 @@ class TestHfWeightIteratorFactory:
 
         captured = {}
 
-        def _capture_init(self, args, model, *, placement, model_name, quantization_config):
+        def _capture_init(self, args, model, *, placement, model_name, quantization_config, parameter_scope):
             captured["placement"] = placement
 
         with patch.object(HfWeightIteratorBridge, "__init__", _capture_init):

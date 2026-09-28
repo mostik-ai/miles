@@ -57,6 +57,7 @@ def _make_args(**overrides):
         actor_num_nodes=1,
         actor_num_gpus_per_node=1,
         pause_generation_mode="retract",
+        update_weight_parameter_scope="all",
     )
     defaults.update(overrides)
     return Namespace(**defaults)

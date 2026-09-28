@@ -55,12 +55,15 @@ class WeightUpdater:
         assert (
             not is_lora or self.protocol.supports_lora
         ), f"LoRA weight sync is not supported for {args.update_weight_transfer_mode!r} weight transfer."
+        # The scope is the live sync's, not every iterator's: an HF snapshot publisher builds its
+        # own iterator and must keep exporting the complete model.
         self._hf_weight_iterator = iterator_factory(
             args,
             model,
             required_placement=self.protocol.required_placement,
             model_name=model_name,
             quantization_config=quantization_config,
+            parameter_scope=args.update_weight_parameter_scope,
         )
         self.weights_getter = weights_getter
         self.weight_version = 0

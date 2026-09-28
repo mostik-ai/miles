@@ -2,11 +2,18 @@ import dataclasses
 import inspect
 import itertools
 
+import torch.distributed as dist
+
 from miles.backends.megatron_utils.update_weight.hf_weight_iterator import (
     MegatronHfWeightIteratorBase,
     _iter_mm_tower_units,
 )
+from miles.backends.training_utils.weight_update.hf_weight_iterator.trainable_scope import (
+    local_trainable_global_names,
+    trainable_source_names,
+)
 from miles.utils import megatron_bridge_utils
+from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.lora.utils import is_lora_weight_name
 
 from ..megatron_to_hf import postprocess_hf_param
@@ -26,6 +33,7 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in weights.items()}
         with megatron_bridge_utils.patch_megatron_model(self.model):
             conversion_tasks = self._bridge.get_conversion_tasks(self.model)
+            trainable_sources = self._trainable_source_names(conversion_tasks)
             conversion_tasks = _process_conversion_tasks(conversion_tasks, renamed_megatron_local_weights)
             named_weights = self._bridge.export_hf_weights(
                 self.model,
@@ -47,11 +55,27 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
 
             named_weights = self._postprocess_and_quantize(named_weights, "base")
             # Group by the (tuple of) source names so quantize's weight + scales land in one unit.
-            for _megatron_name, group in itertools.groupby(named_weights, key=lambda item: item[2]):
+            for megatron_names, group in itertools.groupby(named_weights, key=lambda item: item[2]):
                 unit = [(h, w) for h, w, _m in group if not is_lora_weight_name(h)]
                 if unit:
+                    if not trainable_sources.isdisjoint(megatron_names):
+                        self.trainable_hf_names.update(name for name, _tensor in unit)
                     yield unit
         yield from _iter_mm_tower_units(self.args, materialize=materialize)
+
+    def _trainable_source_names(self, conversion_tasks) -> set[str]:
+        """The source names the export reports for parameters the trainer trains; empty unless
+        the trainable scope is on.
+
+        Read from the vanilla tasks, before ``_process_conversion_tasks`` substitutes the actor's
+        weights: those tensors carry no ``requires_grad``. Only the owning rank can see it, so the
+        ranks agree on global names first and each maps them back onto its own task names."""
+        if self.parameter_scope != "trainable":
+            return set()
+        group = get_gloo_group()
+        gathered: list = [None] * dist.get_world_size(group=group)
+        dist.all_gather_object(gathered, local_trainable_global_names(conversion_tasks), group=group)
+        return trainable_source_names(conversion_tasks, set().union(*gathered))
 
     def _export_pp_local_lora(self, adapter):
         if adapter is None:

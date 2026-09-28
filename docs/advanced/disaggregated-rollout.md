@@ -110,6 +110,41 @@ service mechanism described later in this page. Disk-delta instead establishes
 a versioned publication boundary that can also be consumed by an external
 rollout system.
 
+### Trainable-only synchronization
+
+`--update-weight-parameter-scope` selects *which* parameters a sync sends, independently of the
+transport above:
+
+| Scope | What crosses the boundary |
+|---|---|
+| `all` | Every base weight, on every sync. The default; behavior is unchanged |
+| `trainable` | Only the update units that came from parameters with `requires_grad` |
+
+`trainable` is for a partially frozen base model — a frozen backbone, a frozen tower, the frozen
+side of a composite model — where most of the export is byte-identical on every step. Engines load
+the partial name set through their ordinary weight-load path, so no engine-side change is needed.
+
+```bash
+--megatron-to-hf-mode bridge \
+--update-weight-parameter-scope trainable
+```
+
+The scope belongs to the live weight update only: an HF snapshot publisher builds its own iterator
+and keeps exporting the complete model. Selection happens on whole update units after conversion,
+so a quantized weight is never separated from its scale companion, and every rank still drives the
+exporter in lockstep — the trainer therefore still gathers and converts the frozen parameters, it
+only stops transferring them. Selecting nothing fails the sync instead of silently updating nothing.
+
+A tensor with no trainer-side source parameter is frozen by definition and is not sent: that covers
+checkpoint passthrough tensors a bridge copies from the HF source, and the frozen multimodal tower
+units the Megatron iterators append to the stream.
+
+Current `main` requires `--train-backend megatron --megatron-to-hf-mode bridge`, because only the
+Megatron-Bridge exporter reports the source parameter of an exported tensor. It rejects LoRA
+adapter sync (already adapter-only) and `--check-weight-update-equal` (which compares engines
+against the full trainer state). A parallel layout where one exported source name covers both a
+trainable and a frozen parameter is rejected rather than guessed.
+
 ### Disk-delta publication and activation
 
 Enable disk-delta on a non-colocated Megatron run with a publication directory

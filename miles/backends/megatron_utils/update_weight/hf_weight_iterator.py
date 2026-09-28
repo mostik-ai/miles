@@ -73,6 +73,7 @@ def get_hf_weight_iterator(
     required_placement: WeightUpdatePlacement,
     model_name: str,
     quantization_config: dict | None,
+    parameter_scope: str = "all",
 ) -> HfWeightIteratorBase:
     from miles.backends.megatron_utils.update_weight.hf_weight_iterator_bridge import HfWeightIteratorBridge
     from miles.backends.megatron_utils.update_weight.hf_weight_iterator_direct import HfWeightIteratorDirect
@@ -88,6 +89,7 @@ def get_hf_weight_iterator(
         placement=resolve_placement(required_placement, cls.forced_placement),
         model_name=model_name,
         quantization_config=quantization_config,
+        parameter_scope=parameter_scope,
     )
 
 
