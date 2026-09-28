@@ -74,10 +74,11 @@ def main() -> None:
                 logits, rows, targets, vocab_start=0, temperature=TEMPERATURE, with_entropy=with_entropy, launch=launch
             )
 
-    row_max, row_sum, row_zsum, _ = kernels.row_statistics(
+    row_max, row_sum, row_dsum, target = kernels.row_statistics(
         logits, rows, targets, vocab_start=0, temperature=TEMPERATURE, with_entropy=True
     )
-    lse, mu = row_max + torch.log(row_sum), row_zsum / row_sum
+    log_sum, mean = torch.log(row_sum), row_dsum / row_sum
+    one_minus_p = -torch.expm1(target - log_sum)
     grad_log_probs = torch.randn(args.rows, device=device)
     grad_entropy = torch.randn(args.rows, device=device)
     grad = torch.empty_like(logits)
@@ -88,8 +89,10 @@ def main() -> None:
             logits,
             rows,
             targets,
-            lse,
-            mu,
+            row_max,
+            log_sum,
+            mean,
+            one_minus_p,
             grad_log_probs,
             grad_entropy,
             vocab_start=0,

@@ -47,8 +47,9 @@ def _inputs(n_rows, vocab, dtype, device, seed=0):
 @pytest.mark.parametrize("inplace_backward", [True, False])
 def test_kernels_match_log_softmax(dtype, vocab, temperature, entropy_requires_grad, inplace_backward):
     logits, rows, targets = _inputs(300, vocab, dtype, "cuda")
-    g = torch.randn(rows.numel(), device="cuda")
-    c = torch.randn(rows.numel(), device="cuda")
+    gen = torch.Generator(device="cuda").manual_seed(1)
+    g = torch.randn(rows.numel(), device="cuda", generator=gen)
+    c = torch.randn(rows.numel(), device="cuda", generator=gen)
 
     ref_leaf = logits.clone().requires_grad_(True)
     ref_log_probs, ref_entropy = _reference(ref_leaf, rows, targets, temperature)
@@ -95,12 +96,12 @@ def test_every_launch_shape_matches_log_softmax(launch):
     gradient, and write every element of the gradient."""
     logits, rows, targets = _inputs(64, 50_001, torch.bfloat16, "cuda", seed=15)
     ref_log_probs, ref_entropy = _reference(logits, rows, targets, 0.7)
-    row_max, row_sum, row_zsum, target_logit = kernels.row_statistics(
+    row_max, row_sum, row_dsum, target = kernels.row_statistics(
         logits, rows, targets, vocab_start=0, temperature=0.7, with_entropy=True, launch=launch
     )
-    lse, mu = row_max + torch.log(row_sum), row_zsum / row_sum
-    torch.testing.assert_close(target_logit - lse, ref_log_probs, rtol=1e-5, atol=2e-5)
-    torch.testing.assert_close(lse - mu, ref_entropy, rtol=1e-5, atol=5e-5)
+    log_sum, mean = torch.log(row_sum), row_dsum / row_sum
+    torch.testing.assert_close(target - log_sum, ref_log_probs, rtol=1e-5, atol=2e-5)
+    torch.testing.assert_close(log_sum - mean, ref_entropy, rtol=1e-5, atol=5e-5)
 
     gen = torch.Generator(device="cuda").manual_seed(16)
     g = torch.randn(rows.numel(), device="cuda", generator=gen)
@@ -109,8 +110,21 @@ def test_every_launch_shape_matches_log_softmax(launch):
     ref_lp, ref_ent = _reference(ref_leaf, rows, targets, 0.7)
     ((ref_lp * g).sum() + (ref_ent * c).sum()).backward()
     grad = torch.full_like(logits, float("nan"))  # any element the kernels miss stays NaN
+    one_minus_p = -torch.expm1(target - log_sum)
     kernels.write_logits_grad(
-        grad, logits, rows, targets, lse, mu, g, c, vocab_start=0, temperature=0.7, launch=launch
+        grad,
+        logits,
+        rows,
+        targets,
+        row_max,
+        log_sum,
+        mean,
+        one_minus_p,
+        g,
+        c,
+        vocab_start=0,
+        temperature=0.7,
+        launch=launch,
     )
     kernels.zero_unscored_rows(grad, rows, launch=launch)
     torch.testing.assert_close(grad.float(), ref_leaf.grad.float(), rtol=1e-2, atol=1e-3)
