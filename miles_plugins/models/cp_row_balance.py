@@ -35,9 +35,12 @@ class RowBalancePlan:
         return sum(self.output_splits)
 
 
-def scoring_rank_of_chunk(chunk: Tensor, cp_size: int) -> Tensor:
-    """Chunk 2r goes to rank r and chunk 2r + 1 to rank cp - 1 - r: chunk costs pair up evenly."""
-    return torch.where(chunk % 2 == 0, chunk // 2, cp_size - 1 - chunk // 2)
+def scoring_rank_of_chunk(chunk: int, cp_size: int) -> int:
+    """Chunk 2r goes to rank r and chunk 2r + 1 to rank cp - 1 - r: an early chunk pairs with a late one.
+
+    This is Miles' zigzag layout with the ranks relabeled so that each rank keeps its own first chunk.
+    """
+    return chunk // 2 if chunk % 2 == 0 else cp_size - 1 - chunk // 2
 
 
 def plan_causal_row_balance(
@@ -62,95 +65,91 @@ def plan_causal_row_balance(
         raise ValueError(f"a stream of {total} rows does not split evenly over {cp_size} ranks")
     rank_rows = total // cp_size
 
-    pieces = _split_at_rank_boundaries(_chunks(seq_lens, cp_size), rank_rows)
+    pieces = _pieces(seq_lens, cp_size, rank_rows)
     if not _worth_balancing(pieces, cp_size, min_gain):
         return None
     return _plan_for_rank(pieces, cp_rank=cp_rank, cp_size=cp_size, rank_rows=rank_rows, device=device)
 
 
 @dataclass(frozen=True)
-class _Intervals:
-    """Row intervals ``[start, start + rows)`` of the stream, in ascending position.
+class _Piece:
+    """Stream rows ``[start, start + rows)``, held by ``owner`` and scored by ``scorer``.
 
-    ``offset`` is where each interval starts inside its own sequence, ``scorer`` the rank that
-    scores it, and ``owner`` the rank that holds it (set once intervals are cut at rank boundaries).
+    ``offset`` is where the piece starts inside its own sequence.
     """
 
-    start: Tensor
-    rows: Tensor
-    offset: Tensor
-    scorer: Tensor
-    owner: Tensor | None = None
+    start: int
+    rows: int
+    offset: int
+    owner: int
+    scorer: int
 
 
-def _chunks(seq_lens, cp_size: int) -> _Intervals:
-    """Every sequence cut into 2 * cp near-equal chunks, each with its scoring rank; empty ones dropped.
+def _pieces(seq_lens, cp_size: int, rank_rows: int) -> list[_Piece]:
+    """Every sequence's 2 * cp chunks in stream order, cut where a rank's rows end.
 
-    Chunk c of a sequence of n rows holds offsets [ceil(c n / 2cp), ceil((c + 1) n / 2cp)).
+    Chunk c of a sequence of n rows holds offsets [ceil(c n / 2cp), ceil((c + 1) n / 2cp)), so it is
+    at most half a rank's rows, rounded up, and crosses at most one rank boundary.
     """
     n_chunks = 2 * cp_size
-    lens = torch.tensor(seq_lens, dtype=torch.int64)
-    edges = (torch.arange(n_chunks + 1) * lens[:, None] + n_chunks - 1) // n_chunks
-    lo, hi = edges[:, :-1].reshape(-1), edges[:, 1:].reshape(-1)
-    seq_start = (torch.cumsum(lens, 0) - lens).repeat_interleave(n_chunks)
-    scorer = scoring_rank_of_chunk(torch.arange(n_chunks).repeat(len(seq_lens)), cp_size)
-    keep = hi > lo
-    return _Intervals(start=(seq_start + lo)[keep], rows=(hi - lo)[keep], offset=lo[keep], scorer=scorer[keep])
+    pieces = []
+    seq_start = 0
+    for n in seq_lens:
+        for chunk in range(n_chunks):
+            lo, hi = _ceil_div(chunk * n, n_chunks), _ceil_div((chunk + 1) * n, n_chunks)
+            scorer = scoring_rank_of_chunk(chunk, cp_size)
+            while lo < hi:
+                owner = (seq_start + lo) // rank_rows
+                cut = min(hi, (owner + 1) * rank_rows - seq_start)
+                pieces.append(_Piece(start=seq_start + lo, rows=cut - lo, offset=lo, owner=owner, scorer=scorer))
+                lo = cut
+        seq_start += n
+    return pieces
 
 
-def _split_at_rank_boundaries(chunks: _Intervals, rank_rows: int) -> _Intervals:
-    """Cut every chunk where a rank's rows end, so each piece has one owner and one scorer."""
-    first_owner = chunks.start // rank_rows
-    n_pieces = (chunks.start + chunks.rows - 1) // rank_rows - first_owner + 1
-    chunk = torch.repeat_interleave(n_pieces)
-    owner = first_owner[chunk] + _concat_ranges(torch.zeros_like(n_pieces), n_pieces)
-    start = torch.maximum(chunks.start[chunk], owner * rank_rows)
-    end = torch.minimum(chunks.start[chunk] + chunks.rows[chunk], (owner + 1) * rank_rows)
-    return _Intervals(
-        start=start,
-        rows=end - start,
-        offset=chunks.offset[chunk] + (start - chunks.start[chunk]),
-        scorer=chunks.scorer[chunk],
-        owner=owner,
-    )
-
-
-def _worth_balancing(pieces: _Intervals, cp_size: int, min_gain: float) -> bool:
-    """Whether scoring on ``scorer`` cuts the busiest rank's causal cost by ``min_gain``."""
-    lo, hi = pieces.offset, pieces.offset + pieces.rows
-    cost = (hi * (hi + 1) - lo * (lo + 1)) // 2  # sum of offset + 1 over each piece
-    contiguous = torch.zeros(cp_size, dtype=torch.int64).index_add_(0, pieces.owner, cost).max().item()
-    balanced = torch.zeros(cp_size, dtype=torch.int64).index_add_(0, pieces.scorer, cost).max().item()
-    return balanced <= (1 - min_gain) * contiguous
+def _worth_balancing(pieces: list[_Piece], cp_size: int, min_gain: float) -> bool:
+    """Whether scoring each piece on its scorer cuts the busiest rank's causal cost by ``min_gain``."""
+    contiguous, balanced = [0] * cp_size, [0] * cp_size
+    for piece in pieces:
+        end = piece.offset + piece.rows
+        cost = (end * (end + 1) - piece.offset * (piece.offset + 1)) // 2  # sum of offset + 1 over the piece
+        contiguous[piece.owner] += cost
+        balanced[piece.scorer] += cost
+    return max(balanced) <= (1 - min_gain) * max(contiguous)
 
 
 def _plan_for_rank(
-    pieces: _Intervals, *, cp_rank: int, cp_size: int, rank_rows: int, device: torch.device | str
+    pieces: list[_Piece], *, cp_rank: int, cp_size: int, rank_rows: int, device: torch.device | str
 ) -> RowBalancePlan:
-    sent = pieces.owner == cp_rank
-    # stable: rows bound for one rank keep ascending position, the order the receiver expects
-    order = torch.argsort(pieces.scorer[sent], stable=True)
-    received = pieces.scorer == cp_rank
+    # sorted() is stable: rows bound for one rank keep ascending position, the order the receiver expects
+    sent = sorted((piece for piece in pieces if piece.owner == cp_rank), key=lambda piece: piece.scorer)
+    received = [piece for piece in pieces if piece.scorer == cp_rank]
+    input_splits, output_splits = [0] * cp_size, [0] * cp_size
+    for piece in sent:
+        input_splits[piece.scorer] += piece.rows
+    for piece in received:
+        output_splits[piece.owner] += piece.rows
     return RowBalancePlan(
-        send_rows=_concat_ranges(pieces.start[sent][order] - cp_rank * rank_rows, pieces.rows[sent][order], device),
-        input_splits=_rows_per_rank(pieces.scorer[sent], pieces.rows[sent], cp_size),
-        output_splits=_rows_per_rank(pieces.owner[received], pieces.rows[received], cp_size),
-        scored_positions=_concat_ranges(pieces.start[received], pieces.rows[received], device),
+        send_rows=_concat_ranges([p.start - cp_rank * rank_rows for p in sent], [p.rows for p in sent], device),
+        input_splits=tuple(input_splits),
+        output_splits=tuple(output_splits),
+        scored_positions=_concat_ranges([p.start for p in received], [p.rows for p in received], device),
     )
 
 
-def _concat_ranges(starts: Tensor, lengths: Tensor, device: torch.device | str = "cpu") -> Tensor:
+def _ceil_div(numerator: int, denominator: int) -> int:
+    return -(-numerator // denominator)
+
+
+def _concat_ranges(starts: list[int], lengths: list[int], device: torch.device | str) -> Tensor:
     """``cat([arange(s, s + n) for s, n in zip(starts, lengths)])``, expanded on ``device``.
 
     Only the per-range table crosses to the device; the rows are generated there.
     """
-    total = int(lengths.sum())
-    base, lengths = torch.stack([starts - (torch.cumsum(lengths, 0) - lengths), lengths]).to(device)
-    return base.repeat_interleave(lengths, output_size=total) + torch.arange(total, device=device)
-
-
-def _rows_per_rank(rank: Tensor, rows: Tensor, cp_size: int) -> tuple[int, ...]:
-    return tuple(torch.zeros(cp_size, dtype=torch.int64).index_add_(0, rank, rows).tolist())
+    starts_t, lengths_t = torch.tensor([starts, lengths], dtype=torch.int64)
+    total = int(lengths_t.sum())
+    base, lengths_t = torch.stack([starts_t - (torch.cumsum(lengths_t, 0) - lengths_t), lengths_t]).to(device)
+    return base.repeat_interleave(lengths_t, output_size=total) + torch.arange(total, device=device)
 
 
 class RowExchange:

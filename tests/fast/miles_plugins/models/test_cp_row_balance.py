@@ -36,7 +36,8 @@ def _reference_plan(seq_lens, cp_rank, cp_size, min_gain):
     positions = torch.arange(total)
     seq = torch.repeat_interleave(torch.arange(len(seq_lens)), lens)
     offset = positions - (torch.cumsum(lens, 0) - lens)[seq]
-    scorer = scoring_rank_of_chunk(offset * 2 * cp_size // lens[seq], cp_size)
+    chunk = offset * 2 * cp_size // lens[seq]
+    scorer = torch.where(chunk % 2 == 0, chunk // 2, cp_size - 1 - chunk // 2)
     owner = positions // rank_rows
     cost = (offset + 1).double()
     contiguous = torch.zeros(cp_size, dtype=torch.float64).index_add_(0, owner, cost)
@@ -130,7 +131,7 @@ def test_one_sequence_is_a_single_pairwise_swap(cp_size):
 def test_chunk_pairing_pairs_early_with_late():
     """Chunk 2r goes to rank r and chunk 2r + 1 to rank cp - 1 - r, so costs sum to 2cp - 1 per rank."""
     cp_size = 4
-    ranks = scoring_rank_of_chunk(torch.arange(2 * cp_size), cp_size).tolist()
+    ranks = [scoring_rank_of_chunk(chunk, cp_size) for chunk in range(2 * cp_size)]
     by_rank = [[chunk for chunk, rank in enumerate(ranks) if rank == r] for r in range(cp_size)]
 
     assert by_rank == [[0, 7], [2, 5], [3, 4], [1, 6]]
