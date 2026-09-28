@@ -28,7 +28,7 @@ from miles.utils.pydantic_utils import FrozenStrictBaseModel
 FT_COMPONENTS: tuple[str, ...] = ("train", "rollout")
 DEFAULT_SEED: int = 42
 DEFAULT_NUM_ROLLOUT: int = 250
-DEFAULT_TRAINER_CRASH_INTERVAL_SECONDS: float = 600.0
+DEFAULT_TRAINER_CRASH_INTERVAL_SECONDS: float = 300.0
 DEFAULT_ROLLOUT_CRASH_INTERVAL_SECONDS: float = 1200.0
 # Must stay identical to the threshold asserted by the no-fault baseline
 # tests/e2e/long/test_qwen2.5_0.5B_gsm8k.py: fault recovery must not cost accuracy.

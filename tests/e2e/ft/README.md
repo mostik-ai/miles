@@ -520,7 +520,7 @@ Faults are random, so beyond the witnesses no exact sequence is asserted.
 ```
 Type: soak (no baseline run; reference = the baseline test's wandb curves)
 Entry: test_realistic_gsm8k__kill_train_rollout.py, no mode variants
-CLI: --seed (42), --num-rollout (250), --trainer-crash-interval-seconds (600),
+CLI: --seed (42), --num-rollout (250), --trainer-crash-interval-seconds (300),
      --rollout-crash-interval-seconds (1200), --metric-threshold (0.55), --fully-async (off),
      --fault-triggers (timer hook); no --mode
 
