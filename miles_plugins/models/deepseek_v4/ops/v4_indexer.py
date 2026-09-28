@@ -218,6 +218,9 @@ def indexer_topk(q, k, weights, positions, thd_layout, *, compress_ratio, index_
     Returns:
         [batch, rows, min(index_topk, n_kv)] int32 compressed-key indices
     """
+    if q.shape[0] == 0:
+        # a balanced plan can leave a rank nothing to score, and TileLang cannot launch an empty grid
+        return torch.empty(q.shape[1], 0, min(index_topk, k.shape[0]), dtype=torch.int32, device=q.device)
     if thd_layout is None:
         cu_ks = torch.zeros_like(positions, dtype=torch.int32)
         cu_ke = ((positions + 1) // compress_ratio).int()

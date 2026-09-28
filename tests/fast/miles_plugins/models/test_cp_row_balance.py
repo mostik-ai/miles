@@ -41,7 +41,7 @@ def _reference_plan(seq_lens, cp_rank, cp_size, min_gain):
     cost = (offset + 1).double()
     contiguous = torch.zeros(cp_size, dtype=torch.float64).index_add_(0, owner, cost)
     balanced = torch.zeros(cp_size, dtype=torch.float64).index_add_(0, scorer, cost)
-    if balanced.max() > (1 - min_gain) * contiguous.max() or not torch.bincount(scorer, minlength=cp_size).all():
+    if balanced.max() > (1 - min_gain) * contiguous.max():
         return None
     local_scorer = scorer[cp_rank * rank_rows : (cp_rank + 1) * rank_rows]
     mine = scorer == cp_rank
@@ -142,12 +142,6 @@ def test_a_pack_of_equal_short_documents_keeps_the_contiguous_layout():
     assert all(plan is None for plan in _plans([512] * 64, 4))
 
 
-def test_a_plan_never_leaves_a_rank_without_rows():
-    """Documents shorter than 2cp leave chunks empty; a rank with none of them has nothing to score."""
-    seq_lens = [1] * 235 + [2] * 76 + [5] * 25
-    assert all(plan is None for plan in _plans(seq_lens, 4))
-
-
 def test_a_long_document_in_a_pack_is_balanced():
     seq_lens = [24576, 2048, 2048, 2048, 2048]
     rank_rows = sum(seq_lens) // 4
@@ -200,3 +194,10 @@ def _exchange_worker(rank, world_size, port, seq_lens):
 @pytest.mark.parametrize("seq_lens", [(512,), (320, 96, 64, 32)])
 def test_exchange_round_trips_over_a_process_group(world_size, seq_lens):
     run_multiprocess(partial(_exchange_worker, seq_lens=seq_lens), world_size=world_size)
+
+
+def test_exchange_round_trips_when_a_rank_scores_nothing():
+    """Documents shorter than 2cp leave chunks empty, so the gate can accept a plan with an idle rank."""
+    seq_lens = (1,) * 235 + (2,) * 76 + (5,) * 25
+    assert [plan.num_scored for plan in _plans(seq_lens, 4)] == [336, 0, 126, 50]
+    run_multiprocess(partial(_exchange_worker, seq_lens=seq_lens), world_size=4)

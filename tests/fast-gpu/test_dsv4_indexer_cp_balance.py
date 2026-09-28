@@ -9,8 +9,9 @@ topk_for_local_rows, once keeping its rows and once balancing them with a collec
 while the rows are in flight. The balanced picks must equal the local ones, bit for bit for the torch
 top-k and as sets for flashinfer; unpacked, the local ones must also equal the pre-balancing
 indexer's (tests/fast/test_dsv4_thd.py pins the THD bounds to running each sample alone). Cases:
-unpacked batch 1 and 2, THD packs with a long document and with odd scored-row counts, and a pack of
-equal short documents, which must skip the exchange.
+unpacked batch 1 and 2, THD packs with a long document and with odd scored-row counts, a pack of
+tiny documents that leaves a CP4 rank nothing to score, and a pack of equal short documents, which
+must skip the exchange.
 """
 
 import os
@@ -137,6 +138,10 @@ def main():
             # ranks score unequal, odd row counts, so the scorer's last 2-row block runs past the end
             "pack: odd scored-row counts": dict(thd_seq_lens=[SEQLEN_GLOBAL - 2, 1, 1], bsz=1, expect_exchange=True),
             "pack: equal short docs": dict(thd_seq_lens=[512] * (SEQLEN_GLOBAL // 512), bsz=1, expect_exchange=False),
+            # documents shorter than 2cp: at CP4 rank 1 scores nothing; at CP8 the gate keeps the rows local
+            "pack: tiny docs": dict(
+                thd_seq_lens=[1] * 7520 + [2] * 2432 + [5] * 800, bsz=1, expect_exchange=world_size in (2, 4)
+            ),
         }
         passed = True
         for topk_backend in _topk_backends():
