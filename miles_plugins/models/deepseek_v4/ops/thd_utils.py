@@ -10,15 +10,11 @@ globally-numbered ``cu_seqlens``, while ``deepseek_v4`` all-gathers the KV. Pass
 absolute, so the KV layout is unchanged.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import torch
 import torch.distributed as dist
 from torch import Tensor
-
-# Attribute holding the per-micro-batch cache on ``packed_seq_params``: every layer of a micro-batch
-# sees that object, including under recompute, and each micro-batch gets a new one.
-_MICRO_BATCH_CACHE_ATTR = "_dsv4_thd_micro_batch_cache"
 
 
 @dataclass
@@ -28,8 +24,6 @@ class ThdLayout:
     The first three fields come from the packed sequence parameters. The rest are filled in as
     the forward runs: ``cu_seqlens_compressed`` before the compressor is called, and the
     compaction ones only under CP, where a compressed group can straddle the split.
-    ``micro_batch_cache`` is shared by every layer's layout of one micro-batch, for values that
-    need a host sync to derive.
     """
 
     cu_seqlens: Tensor
@@ -39,33 +33,28 @@ class ThdLayout:
     compressed_group_ids: Tensor | None = None
     seq_to_rank_row: Tensor | None = None
     cu_seqlens_compressed: Tensor | None = None
-    micro_batch_cache: dict = field(default_factory=dict)
 
     @classmethod
     def from_packed_seq_params(cls, packed_seq_params, *, cp_rank: int, seqlen_local: int):
         """This rank's layout, or None for any format other than thd."""
         if packed_seq_params is None or packed_seq_params.qkv_format != "thd":
             return None
-        cache = getattr(packed_seq_params, _MICRO_BATCH_CACHE_ATTR, None)
-        if cache is None:
-            cache = {}
-            setattr(packed_seq_params, _MICRO_BATCH_CACHE_ATTR, cache)
         return cls(
             cu_seqlens=packed_seq_params.cu_seqlens_q,
             # CP splits the packed stream contiguously, so this rank's rows start here globally.
             global_start=cp_rank * seqlen_local,
             max_seqlen=packed_seq_params.max_seqlen_q,
-            micro_batch_cache=cache,
         )
 
-    def host_seq_lens(self, total_rows: int) -> tuple[int, ...]:
-        """Segment lengths on the host, tiling ``total_rows``; costs a device sync.
 
-        Rows past ``cu_seqlens[-1]`` belong to the last segment, as in ``batch_of_row``.
-        """
-        seq_lens = torch.diff(self.cu_seqlens).tolist()
-        seq_lens[-1] += total_rows - sum(seq_lens)
-        return tuple(seq_lens)
+def host_segment_lengths(cu_seqlens: Tensor, total_rows: int) -> tuple[int, ...]:
+    """Segment lengths on the host, tiling ``total_rows``; costs a device sync.
+
+    Rows past ``cu_seqlens[-1]`` belong to the last segment, as in ``batch_of_row``.
+    """
+    seq_lens = torch.diff(cu_seqlens).tolist()
+    seq_lens[-1] += total_rows - sum(seq_lens)
+    return tuple(seq_lens)
 
 
 def batch_of_row(cu_seqlens: Tensor, total_rows: int, global_start: int = 0) -> Tensor:

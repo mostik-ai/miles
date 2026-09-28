@@ -9,7 +9,6 @@ the CP collectives in tests/fast-gpu/test_dsv4_thd_cp_correctness.py.
 """
 
 import random
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -18,7 +17,6 @@ from tests.ci.ci_register import register_cpu_ci
 
 from miles_plugins.models.deepseek_v4.ops.thd_utils import (
     CompressorInputCompact,
-    ThdLayout,
     compact_gather_index,
     compact_group_capacity,
     compress_bounds_at_positions,
@@ -28,6 +26,7 @@ from miles_plugins.models.deepseek_v4.ops.thd_utils import (
     get_compress_cu_seqlens_thd,
     get_compress_topk_idxs_thd,
     get_window_topk_idxs_thd,
+    host_segment_lengths,
     to_rank_major_rows,
 )
 
@@ -259,17 +258,7 @@ def test_compress_bounds_follow_the_position_not_the_row(ratio, shape):
     assert torch.equal(got_ks, ks[positions]) and torch.equal(got_ke, ke[positions])
 
 
-def test_the_layouts_of_one_micro_batch_share_one_cache():
-    """Every layer builds its own layout from the micro-batch's packed_seq_params."""
-    lens = [1536, 512, 7]
-    params = SimpleNamespace(qkv_format="thd", cu_seqlens_q=_cu(lens), max_seqlen_q=max(lens))
-    first = ThdLayout.from_packed_seq_params(params, cp_rank=0, seqlen_local=1028)
-    second = ThdLayout.from_packed_seq_params(params, cp_rank=1, seqlen_local=1028)
-    next_batch = SimpleNamespace(qkv_format="thd", cu_seqlens_q=_cu([2056]), max_seqlen_q=2056)
-    next_layout = ThdLayout.from_packed_seq_params(next_batch, cp_rank=0, seqlen_local=1028)
-
-    assert second.micro_batch_cache is first.micro_batch_cache
-    assert next_layout.micro_batch_cache is not first.micro_batch_cache
-    # rows past cu_seqlens[-1] belong to the last segment, as in batch_of_row
-    assert first.host_seq_lens(2056) == (1536, 512, 8)
-    assert next_layout.host_seq_lens(2056) == (2056,)
+def test_host_segment_lengths_give_trailing_rows_to_the_last_segment():
+    """Rows past cu_seqlens[-1] belong to the last segment, as in batch_of_row."""
+    assert host_segment_lengths(_cu([1536, 512, 7]), 2056) == (1536, 512, 8)
+    assert host_segment_lengths(_cu([2056]), 2056) == (2056,)

@@ -8,6 +8,7 @@ results back; ``LocalRows`` is the same interface without an exchange. Nothing c
 """
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 import torch.distributed as dist
@@ -43,8 +44,10 @@ def scoring_rank_of_chunk(chunk: int, cp_size: int) -> int:
     return chunk // 2 if chunk % 2 == 0 else cp_size - 1 - chunk // 2
 
 
+# enough for every micro-batch in flight under pipeline parallelism; a miss only rebuilds the plan
+@lru_cache(maxsize=32)
 def plan_causal_row_balance(
-    seq_lens: tuple[int, ...] | list[int],
+    seq_lens: tuple[int, ...],
     *,
     cp_rank: int,
     cp_size: int,
@@ -56,7 +59,8 @@ def plan_causal_row_balance(
     ``seq_lens`` must tile the whole stream, padding included, and the stream must split evenly
     over the ranks. Returns None when balancing would not lower the busiest rank's causal cost
     (``offset + 1`` per row) by ``min_gain``. A rank may be left with no rows to score. Host work is
-    proportional to sequences times ranks; the row indices are generated on ``device``.
+    proportional to sequences times ranks; the row indices are generated on ``device``. Plans are
+    memoized, so every layer and every recompute of a micro-batch shares one.
     """
     if min(seq_lens) < 0:
         raise ValueError(f"sequence lengths must be non-negative, got {min(seq_lens)}")

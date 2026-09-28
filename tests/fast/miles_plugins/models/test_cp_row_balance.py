@@ -79,7 +79,9 @@ def test_matches_the_row_by_row_reference(cp_size, seed):
     seq_lens.append(cp_size - sum(seq_lens) % cp_size)
     for min_gain in (-1.0, 0.1):
         for rank in range(cp_size):
-            plan = plan_causal_row_balance(seq_lens, cp_rank=rank, cp_size=cp_size, device="cpu", min_gain=min_gain)
+            plan = plan_causal_row_balance(
+                tuple(seq_lens), cp_rank=rank, cp_size=cp_size, device="cpu", min_gain=min_gain
+            )
             reference = _reference_plan(seq_lens, rank, cp_size, min_gain)
             assert (plan is None) == (reference is None), f"gate differs for {seq_lens}"
             if plan is not None:

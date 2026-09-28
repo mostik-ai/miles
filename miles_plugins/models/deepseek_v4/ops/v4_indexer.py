@@ -1,5 +1,3 @@
-from functools import lru_cache
-
 import einops
 import torch
 from megatron.core import parallel_state
@@ -8,6 +6,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
+from torch.utils.weak import WeakIdKeyDictionary
 
 from miles.utils.replay_base import indexer_replay_manager
 from miles_plugins.models.cp_row_balance import (
@@ -22,7 +21,12 @@ from miles_plugins.models.deepseek_v4.ops.cp_utils import all_gather_cp, get_fre
 from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import batched_indexer_fwd
 from miles_plugins.models.deepseek_v4.ops.qat import fp8_simulate_qat
 from miles_plugins.models.deepseek_v4.ops.rope import apply_rotary_emb, wrapped_precompute_freqs_cis
-from miles_plugins.models.deepseek_v4.ops.thd_utils import ThdLayout, compress_bounds_at_positions, get_q_positions_thd
+from miles_plugins.models.deepseek_v4.ops.thd_utils import (
+    ThdLayout,
+    compress_bounds_at_positions,
+    get_q_positions_thd,
+    host_segment_lengths,
+)
 from miles_plugins.models.deepseek_v4.ops.utils import rotate_activation
 from miles_plugins.models.dsa_topk import get_dsa_topk_fn
 
@@ -238,18 +242,21 @@ def indexer_topk(q, k, weights, positions, thd_layout, *, compress_ratio, index_
 
 def _row_balance_plan(seqlen_local, thd_layout, cp_group, device) -> RowBalancePlan | None:
     """This micro-batch's balanced exchange; every CP rank derives the same one."""
-    cp_rank, cp_size = cp_group.rank(), cp_group.size()
+    cp_size = cp_group.size()
+    total_rows = seqlen_local * cp_size
     if thd_layout is None:
-        return _unpacked_row_balance_plan(seqlen_local * cp_size, cp_rank, cp_size, str(device))
-    key = ("row_balance_plan", seqlen_local)
-    cache = thd_layout.micro_batch_cache
-    if key not in cache:
-        seq_lens = thd_layout.host_seq_lens(seqlen_local * cp_size)
-        cache[key] = plan_causal_row_balance(seq_lens, cp_rank=cp_rank, cp_size=cp_size, device=device)
-    return cache[key]
+        seq_lens = (total_rows,)  # each batch row of an unpacked sample is one sequence
+    else:
+        seq_lens = _host_seq_lens(thd_layout.cu_seqlens, total_rows)
+    return plan_causal_row_balance(seq_lens, cp_rank=cp_group.rank(), cp_size=cp_size, device=device)
 
 
-@lru_cache(maxsize=8)
-def _unpacked_row_balance_plan(seqlen, cp_rank, cp_size, device):
-    """Each batch row of an unpacked sample is one sequence, so the plan depends only on the shape."""
-    return plan_causal_row_balance((seqlen,), cp_rank=cp_rank, cp_size=cp_size, device=device)
+# a micro-batch's segment lengths on the host, keyed by the cu_seqlens tensor every layer shares
+_HOST_SEQ_LENS = WeakIdKeyDictionary()
+
+
+def _host_seq_lens(cu_seqlens: torch.Tensor, total_rows: int) -> tuple[int, ...]:
+    """The lengths behind ``cu_seqlens``, copied to the host once per micro-batch rather than per layer."""
+    if cu_seqlens not in _HOST_SEQ_LENS:
+        _HOST_SEQ_LENS[cu_seqlens] = host_segment_lengths(cu_seqlens, total_rows)
+    return _HOST_SEQ_LENS[cu_seqlens]
