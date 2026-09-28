@@ -247,10 +247,19 @@ class TestSchedulerGates:
         assert scheduler.choose(events=events, now=_LATER) is None
         assert scheduler.choose(events=[*events, *_polls(_actors(), count=1, start=7)], now=_LATER) is not None
 
-    def test_an_alive_but_unready_target_blocks_injection(self) -> None:
-        """Every expected target must be ready, not just alive."""
+    def test_an_alive_but_unready_target_is_never_chosen_yet_leaves_its_ready_peers_eligible(self) -> None:
+        """A paused health check flickers readiness on every weight update, so only the chosen target must be ready."""
         scheduler = _scheduler({"actor": [_FakeForm()]})
-        targets = [_cell_target(cell_index=0), _cell_target(cell_index=1, ready=False)]
+        ready, unready = _cell_target(cell_index=0), _cell_target(cell_index=1, ready=False)
+
+        request = scheduler.choose(events=_polls([ready, unready], count=2), now=_LATER)
+
+        assert request is not None and request.target == ready
+
+    def test_no_ready_target_blocks_injection(self) -> None:
+        """Every expected target alive but none ready leaves nothing to inject into."""
+        scheduler = _scheduler({"actor": [_FakeForm()]})
+        targets = [_cell_target(cell_index=0, ready=False), _cell_target(cell_index=1, ready=False)]
 
         assert scheduler.choose(events=_polls(targets, count=2), now=_LATER) is None
 

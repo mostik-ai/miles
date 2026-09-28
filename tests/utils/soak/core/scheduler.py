@@ -129,12 +129,11 @@ class SoakActionScheduler:
 
 
 def _eligible_targets(*, targets: list[SoakTarget], policy: SoakTargetConfig, harms_target: bool) -> list[SoakTarget]:
-    ready = [target for target in targets if target.ready]
-    if len(ready) != len(targets) or len(targets) != policy.expected_count:
+    if len(targets) != policy.expected_count or not all(target.alive for target in targets):
         return []
-    if harms_target and len(ready) < 2:
+    if harms_target and len(targets) < 2:
         return []
-    return ready
+    return [target for target in targets if target.ready]
 
 
 def _draw_form(
