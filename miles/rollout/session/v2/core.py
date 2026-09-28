@@ -42,6 +42,13 @@ class SessionCoreV2(SessionCore):
         # Import-path only in production: function_registry is process-local.
         self.sample_picker = load_function(config.session_sample_picker_path, sync_required=True)
         self.sample_postprocessor = load_function(config.session_sample_postprocessor_path, sync_required=True)
+        if self.conditioning_hook is not None:
+            # v2 owns its own chat_completions and samples op, so inheriting the field without
+            # inheriting the behaviour would silently serve unconditioned calls.
+            raise ValueError(
+                "--session-conditioning-hook-path is implemented for linear sessions only; "
+                "tree serving (v2) would silently drop it"
+            )
 
     def _session_metadata(self, session_id: str, session) -> dict:
         """Mirrors ``core.SessionCore._session_metadata``: token ids come from

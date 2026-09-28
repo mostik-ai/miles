@@ -91,6 +91,9 @@ class LinearTrajectory:
     evaluation: bool = False
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
+    # Pre-proxy conditioning (see rollout/session/conditioning.py); both stay unset without a hook.
+    conditioning_ref: dict[str, Any] | None = None
+    calls_started: int = 0
 
     @property
     def turn_args(self) -> dict[str, Any]:
@@ -104,6 +107,16 @@ class LinearTrajectory:
 
     def append_record(self, record: SessionRecord) -> None:
         self.records.append(record)
+
+    def next_call_sequence(self) -> int:
+        """A unique id for this call attempt. Must be called under ``self.lock``.
+
+        Counts *attempts*, not committed turns: the lock is released across the backend call and
+        overlapping requests are allowed, so two concurrent calls can observe one ``num_assistant``
+        and a sequence derived from it would collide.
+        """
+        self.calls_started += 1
+        return self.calls_started
 
     def prepare_token_ids_and_request_args(
         self,

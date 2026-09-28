@@ -18,6 +18,7 @@ from starlette.responses import Response
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.config import SessionServerConfig
+from miles.rollout.session.conditioning import apply_conditioning, stamp_conditioning
 from miles.rollout.session.errors import (
     SessionNotFoundError,
     TokenizationError,
@@ -33,6 +34,7 @@ from miles.rollout.session.samples.merge import (
     truncate_samples_by_total_tokens,
 )
 from miles.rollout.session.types import GetSessionResponse, SessionRecord
+from miles.utils.function_registry import load_function
 
 logger = logging.getLogger(__name__)
 
@@ -219,6 +221,9 @@ class SessionCore:
         # Derived from pause_generation_mode at server bootstrap; session code
         # must depend on this capability, never on the weight-update mode.
         self.use_addition_r3 = use_addition_r3
+        # None unless --session-conditioning-hook-path is set; resolved once, so a bad import
+        # path fails at server construction rather than on the first model call.
+        self.conditioning_hook = load_function(config.session_conditioning_hook_path)
 
     def _maybe_request_addition_r3(
         self, request_body: dict, checkpoint_token_ids: list[int], prompt_token_ids: list[int]
@@ -310,6 +315,8 @@ class SessionCore:
                 samples = [merge_samples(samples, tokenizer)]
         except (AssertionError, ValueError) as exc:
             return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
+        # After the merge, so a merged sample carries the session's reference exactly once.
+        stamp_conditioning(samples, session.conditioning_ref)
         return _samples_response(encode_samples(samples, metadata, fields=fields))
 
     async def delete_session(self, session_id: str) -> Response:
@@ -362,9 +369,23 @@ class SessionCore:
             # the checkpoint this request builds on.
             self._maybe_request_addition_r3(request_body, session.token_ids, prompt_token_ids)
 
-            proxy_body = json.dumps(request_body).encode()
+            call_sequence = session.next_call_sequence()
             expected_num_assistant = session.num_assistant
         # --- lock released ---
+
+        # --- Phase 1b: conditioning, before the backend sees the call (no lock held) ---
+        # The hook may materialize an external artifact and name it on the request, so it must
+        # run before the proxy and outside the lock: producing that artifact is not instant.
+        if self.conditioning_hook is not None:
+            session.conditioning_ref = await apply_conditioning(
+                self.conditioning_hook,
+                session_id=session_id,
+                sequence=call_sequence,
+                input_ids=prompt_token_ids,
+                request_body=request_body,
+                previous=session.conditioning_ref,
+            )
+        proxy_body = json.dumps(request_body).encode()
 
         # --- Phase 2: proxy to backend (NO lock held) ---
         headers = {**headers, "X-SMG-Routing-Key": session_id}

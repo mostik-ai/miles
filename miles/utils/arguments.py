@@ -2694,6 +2694,19 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "Default: exactly-once completion masking + rewards keyed by "
                 "response id.",
             )
+            parser.add_argument(
+                "--session-conditioning-hook-path",
+                type=str,
+                default=None,
+                help="Import path of a pre-proxy conditioning hook for TITO sessions: "
+                "fn(session_id, sequence, input_ids, request_body) -> dict | None, sync or "
+                "async. Unset by default, in which case nothing runs. It is called after the "
+                "request is prepared and before the backend proxy, so it can materialize an "
+                "external artifact the engine needs and name it on the request (e.g. a "
+                "namespaced rid); the dict it returns is carried into the metadata of every "
+                "sample assembled from that session under 'conditioning_ref'. The sequence "
+                "number is allocated under the session lock and is unique per call attempt.",
+            )
             return parser
 
         def add_user_provided_function_arguments(parser):

@@ -28,6 +28,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
     pause_generation_mode: str | None
     session_sample_picker_path: str | None
     session_sample_postprocessor_path: str | None
+    session_conditioning_hook_path: str | None = None
 
 
 def compute_session_server_config(
@@ -58,4 +59,5 @@ def compute_session_server_config(
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),
         session_sample_postprocessor_path=getattr(args, "session_sample_postprocessor_path", None),
+        session_conditioning_hook_path=getattr(args, "session_conditioning_hook_path", None),
     )
