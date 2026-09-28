@@ -197,6 +197,23 @@ class TestInjectFaultFormExecute:
 
         assert evidence.observed is ObservedCellFaultKind.UNHEALTHY
 
+    async def test_a_health_check_paused_for_a_weight_update_is_not_the_effect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every weight update pauses the checkers, so an unknown reading must not pass for the fault landing."""
+        api = _FakeCellApi([])
+        api.cell_replies[_ACTOR_0] = [
+            _cell(_ACTOR_0, cell_type="actor", workers_hash="inc-a", healthy=TriState.UNKNOWN),
+            _cell(_ACTOR_0, cell_type="actor", workers_hash="inc-a", healthy=TriState.FALSE),
+        ]
+        _patch_http(monkeypatch, api)
+        form = _form()
+
+        [evidence] = await _execute(form, _create(form, _with_fault_target(_cell_target())))
+
+        assert evidence.observed is ObservedCellFaultKind.UNHEALTHY
+        assert [cell.status.conditions[0].status for cell in api.cell_replies[_ACTOR_0]] == [TriState.FALSE]
+
     async def test_unreadable_or_unchanged_cells_are_not_an_effect(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Transport errors, server errors and a healthy unchanged cell keep waiting for the real effect."""
         api = _FakeCellApi([])

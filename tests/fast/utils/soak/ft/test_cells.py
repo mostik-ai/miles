@@ -7,11 +7,16 @@ from miles.utils.ft_utils.api_server.models import TriState
 
 class TestCellIsAlive:
     @pytest.mark.parametrize(
-        ("healthy", "alive"), [(TriState.TRUE, True), (TriState.FALSE, False), (TriState.UNKNOWN, False)]
+        ("healthy", "alive"), [(TriState.TRUE, True), (TriState.FALSE, False), (TriState.UNKNOWN, True)]
     )
-    def test_only_a_true_healthy_condition_is_alive(self, healthy: TriState, alive: bool) -> None:
-        """An unknown health reading must not count as a live cell."""
+    def test_only_a_failed_health_check_makes_a_running_cell_dead(self, healthy: TriState, alive: bool) -> None:
+        """A health checker paused for a weight update reads unknown, which is not a failure."""
         assert cell_is_alive(_cell("actor-0", cell_type="actor", healthy=healthy)) is alive
+
+    @pytest.mark.parametrize("phase", ["Pending", "Suspended"])
+    def test_a_cell_that_is_not_running_is_not_alive(self, phase: str) -> None:
+        """A cell being healed or not yet started is not alive whatever its last health reading."""
+        assert not cell_is_alive(_cell("actor-0", cell_type="actor", phase=phase, healthy=TriState.UNKNOWN))
 
 
 class TestCellIsReady:
@@ -31,9 +36,10 @@ class TestCellIsReady:
         """Pending or suspended cells are not ready even when healthy and serving."""
         assert not cell_is_ready(_cell("rollout-0", cell_type="rollout", phase=phase))
 
-    def test_a_running_but_unhealthy_cell_is_not_ready(self) -> None:
-        """Readiness requires liveness first."""
-        assert not cell_is_ready(_cell("rollout-0", cell_type="rollout", healthy=TriState.FALSE))
+    @pytest.mark.parametrize("healthy", [TriState.FALSE, TriState.UNKNOWN])
+    def test_a_running_cell_without_a_passing_health_check_is_not_ready(self, healthy: TriState) -> None:
+        """Readiness needs a passing health check, which a paused or failed checker cannot give."""
+        assert not cell_is_ready(_cell("rollout-0", cell_type="rollout", healthy=healthy))
 
 
 class TestCellTypeOf:
