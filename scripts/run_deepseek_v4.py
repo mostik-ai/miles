@@ -403,28 +403,12 @@ def _get_parallel_config(args: ScriptArgs) -> str:
     if actor_num_nodes == 1:
         if args.dsv4_impl == "megatron":
             # dsv4_hybrid needs cp_partition_mode='contiguous' for CP>1, which miles does not set
-            _require_recipe_cp(args, 1)
             # The plugin rejects TP>1; the TP ranks go to DP instead.
-            return (
-                "--tensor-model-parallel-size 1 "
-                "--pipeline-model-parallel-size 1 "
-                "--context-parallel-size 1 "
-                f"--expert-model-parallel-size {actor_num_gpus_per_node} "
-                "--expert-tensor-parallel-size 1 "
-            )
+            return _parallel_flags(args, tp=1, cp=1, ep=actor_num_gpus_per_node)
         cp_size = args.cp_size or 1
         if actor_num_gpus_per_node % cp_size:
             raise NotImplementedError(f"cp_size={cp_size} does not divide {actor_num_gpus_per_node} GPUs")
-        tp_size = actor_num_gpus_per_node // cp_size
-        return (
-            f"--tensor-model-parallel-size {tp_size} "
-            f"{'--sequence-parallel ' if tp_size > 1 else ''}"
-            "--pipeline-model-parallel-size 1 "
-            f"--context-parallel-size {cp_size} "
-            f"{'--allgather-cp ' if cp_size > 1 else ''}"
-            f"--expert-model-parallel-size {actor_num_gpus_per_node} "
-            "--expert-tensor-parallel-size 1 "
-        )
+        return _parallel_flags(args, tp=actor_num_gpus_per_node // cp_size, cp=cp_size, ep=actor_num_gpus_per_node)
 
     if actor_num_gpus_per_node == 4:
         if total_gpus == 32:  # 8 nodes x 4 GPUs
@@ -433,54 +417,14 @@ def _get_parallel_config(args: ScriptArgs) -> str:
                 # CP>1, which no launcher exercises yet -- so the TP and CP ranks both go
                 # to DP. max-tokens-per-gpu below doubles to keep the per-micro-batch
                 # budget (max_tokens_per_gpu * cp_size) equal to the miles recipe's.
-                _require_recipe_cp(args, 1)
-                return (
-                    "--tensor-model-parallel-size 1 "
-                    "--pipeline-model-parallel-size 8 "
-                    "--decoder-first-pipeline-num-layers 4 "
-                    "--decoder-last-pipeline-num-layers 3 "
-                    "--context-parallel-size 1 "
-                    "--expert-model-parallel-size 4 "
-                    "--expert-tensor-parallel-size 1 "
-                )
-            _require_recipe_cp(args, 2)
-            return (
-                "--tensor-model-parallel-size 2 "
-                "--sequence-parallel "
-                "--pipeline-model-parallel-size 8 "
-                "--decoder-first-pipeline-num-layers 4 "
-                "--decoder-last-pipeline-num-layers 3 "
-                "--context-parallel-size 2 "
-                "--allgather-cp "
-                "--expert-model-parallel-size 4 "
-                "--expert-tensor-parallel-size 1 "
-            )
+                return _parallel_flags(args, tp=1, pp=8, pp_edge_layers=(4, 3), cp=1, ep=4)
+            return _parallel_flags(args, tp=2, pp=8, pp_edge_layers=(4, 3), cp=2, ep=4)
 
     if actor_num_gpus_per_node == 8:
         if total_gpus == 64:  # 8 nodes x 8 GPUs
-            _require_recipe_cp(args, 1)
-            return (
-                "--tensor-model-parallel-size 8 "
-                "--sequence-parallel "
-                "--pipeline-model-parallel-size 8 "
-                "--decoder-first-pipeline-num-layers 4 "
-                "--decoder-last-pipeline-num-layers 3 "
-                "--context-parallel-size 1 "
-                "--expert-model-parallel-size 8 "
-                "--expert-tensor-parallel-size 1 "
-            )
+            return _parallel_flags(args, tp=8, pp=8, pp_edge_layers=(4, 3), cp=1, ep=8)
         elif total_gpus == 256:  # 32 nodes x 8 GPUs (Pro)
-            _require_recipe_cp(args, 1)
-            return (
-                "--tensor-model-parallel-size 8 "
-                "--sequence-parallel "
-                "--pipeline-model-parallel-size 8 "
-                "--decoder-first-pipeline-num-layers 7 "
-                "--decoder-last-pipeline-num-layers 6 "
-                "--context-parallel-size 1 "
-                "--expert-model-parallel-size 32 "
-                "--expert-tensor-parallel-size 1 "
-            )
+            return _parallel_flags(args, tp=8, pp=8, pp_edge_layers=(7, 6), cp=1, ep=32)
 
     raise NotImplementedError(
         f"No pre-set parallel config for {total_gpus} GPUs. "
@@ -488,13 +432,27 @@ def _get_parallel_config(args: ScriptArgs) -> str:
     )
 
 
-def _require_recipe_cp(args: ScriptArgs, recipe_cp_size: int) -> None:
-    """A recipe with a fixed CP size accepts ``cp_size`` only when it is unset or equal."""
-    if args.cp_size not in (None, recipe_cp_size):
+def _parallel_flags(
+    args: ScriptArgs, *, tp: int, cp: int, ep: int, pp: int = 1, pp_edge_layers: tuple[int, int] | None = None
+) -> str:
+    """One recipe's parallel flags; a recipe runs its own CP size, so ``cp_size`` must be unset or equal."""
+    if args.cp_size not in (None, cp):
         raise NotImplementedError(
             f"cp_size={args.cp_size} is untested here: this recipe (--dsv4-impl {args.dsv4_impl}, "
-            f"{args.actor_num_nodes}x{args.actor_num_gpus_per_node} GPUs) runs CP{recipe_cp_size}"
+            f"{args.actor_num_nodes}x{args.actor_num_gpus_per_node} GPUs) runs CP{cp}"
         )
+    flags = [f"--tensor-model-parallel-size {tp}"]
+    if tp > 1:
+        flags.append("--sequence-parallel")
+    flags.append(f"--pipeline-model-parallel-size {pp}")
+    if pp_edge_layers is not None:
+        first, last = pp_edge_layers
+        flags += [f"--decoder-first-pipeline-num-layers {first}", f"--decoder-last-pipeline-num-layers {last}"]
+    flags.append(f"--context-parallel-size {cp}")
+    if cp > 1:
+        flags.append("--allgather-cp")  # DeepSeek V4 rejects the zigzag CP split
+    flags += [f"--expert-model-parallel-size {ep}", "--expert-tensor-parallel-size 1"]
+    return "".join(f"{flag} " for flag in flags)
 
 
 def _train(args: ScriptArgs):

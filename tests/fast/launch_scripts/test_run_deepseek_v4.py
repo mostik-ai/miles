@@ -17,6 +17,7 @@ _SINGLE_NODE_4LAYER = {
 }
 _EIGHT_NODES = {"hardware": "H200", "num_nodes": 8, "num_gpus_per_node": 4}
 _EIGHT_NODES_OF_8 = {"hardware": "H200", "num_nodes": 8, "num_gpus_per_node": 8}
+_THIRTY_TWO_NODES_OF_8 = {"hardware": "H200", "num_nodes": 32, "num_gpus_per_node": 8}
 
 
 def _train_command(monkeypatch, tmp_path, overrides):
@@ -47,14 +48,14 @@ def test_single_node_miles_impl_splits_gpus_between_tp_and_cp(monkeypatch, tmp_p
     assert ("--sequence-parallel" in command) == (tp_size > 1)
 
 
-# Every recipe that pins its CP size, with that size: the single-node megatron impl (dsv4_hybrid
-# needs cp_partition_mode='contiguous' for CP>1, which miles does not set) and the multi-node ones.
+# Every recipe that pins its CP size, with that size.
 _FIXED_CP_RECIPES = [
     (_SINGLE_NODE_4LAYER | {"dsv4_impl": "megatron"}, 1),
     (_EIGHT_NODES | {"dsv4_impl": "megatron"}, 1),
     (_EIGHT_NODES | {"dsv4_impl": "miles"}, 2),
     (_EIGHT_NODES_OF_8 | {"dsv4_impl": "megatron"}, 1),
     (_EIGHT_NODES_OF_8 | {"dsv4_impl": "miles"}, 1),
+    (_THIRTY_TWO_NODES_OF_8 | {"dsv4_impl": "miles"}, 1),
 ]
 
 
