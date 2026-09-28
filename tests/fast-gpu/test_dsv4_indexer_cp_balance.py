@@ -18,6 +18,7 @@ import torch
 import torch.distributed as dist
 from tests.ci.ci_register import register_cuda_ci
 
+from miles_plugins.models.cp_row_balance import RowExchange
 from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import (
     _make_causal_cu_seqlens,
     batched_indexer_fwd,
@@ -107,15 +108,16 @@ def check_picks(rank, world_size, topk_backend, thd_seq_lens=None, bsz=1):
     n_kv = int(thd_layout.cu_seqlens_compressed[-1]) if thd_layout else SEQLEN_GLOBAL // RATIO
     q, k, weights = _inputs(rank, rank_rows, n_kv, bsz)
     topk_fn = get_dsa_topk_fn(topk_backend)
-    options = dict(cp_rank=rank, thd_layout=thd_layout, compress_ratio=RATIO, index_topk=TOPK, topk_fn=topk_fn)
+    options = dict(compress_ratio=RATIO, index_topk=TOPK, topk_fn=topk_fn)
+    group = dist.group.WORLD
 
     expected = _unbalanced_topk(q, k, weights, rank, thd_layout, topk_fn)
-    local = topk_for_local_rows(q, weights, k, None, **options)
-    exchange = start_row_exchange(q, weights, thd_layout, dist.group.WORLD)
-    if exchange is None:
-        return _same_picks(local, expected, topk_backend), False
-    balanced = topk_for_local_rows(None, None, k, exchange, **options)
-    return _same_picks(local, expected, topk_backend) and _same_picks(balanced, expected, topk_backend), True
+    kept = start_row_exchange(q, weights, thd_layout, group, balance=False)
+    local = topk_for_local_rows(kept, k, thd_layout, **options)
+    exchange = start_row_exchange(q, weights, thd_layout, group, balance=True)
+    balanced = topk_for_local_rows(exchange, k, thd_layout, **options)
+    picks_equal = _same_picks(local, expected, topk_backend) and _same_picks(balanced, expected, topk_backend)
+    return picks_equal, isinstance(exchange, RowExchange)
 
 
 def _topk_backends():

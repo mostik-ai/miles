@@ -178,6 +178,10 @@ class RowExchange:
         self._received = received
         self._works = works
 
+    @property
+    def scored_positions(self) -> Tensor:
+        return self.plan.scored_positions
+
     def wait(self) -> list[Tensor]:
         """The sent tensors' rows at ``plan.scored_positions``, in that order."""
         for work in self._works:
@@ -204,6 +208,20 @@ class RowExchange:
         local = torch.empty_like(received)
         local[self.plan.send_rows] = received
         return local.movedim(0, dim).contiguous()
+
+
+class LocalRows:
+    """``RowExchange`` without the exchange: this rank scores its own rows, already in local order."""
+
+    def __init__(self, tensors: list[Tensor], scored_positions: Tensor):
+        self.scored_positions = scored_positions
+        self._tensors = tensors
+
+    def wait(self) -> list[Tensor]:
+        return self._tensors
+
+    def return_to_owners(self, results: Tensor, *, dim: int = 0) -> Tensor:
+        return results
 
 
 def send_rows_to_scorers(tensors: list[Tensor], plan: RowBalancePlan, cp_group: dist.ProcessGroup) -> RowExchange:

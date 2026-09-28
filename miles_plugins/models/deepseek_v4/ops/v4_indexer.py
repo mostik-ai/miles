@@ -11,13 +11,14 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 from miles.utils.replay_base import indexer_replay_manager
 from miles_plugins.models.cp_row_balance import (
+    LocalRows,
     RowBalancePlan,
     RowExchange,
     plan_causal_row_balance,
     send_rows_to_scorers,
 )
 from miles_plugins.models.deepseek_v4.ops.compressor import DeepSeekV4Compressor
-from miles_plugins.models.deepseek_v4.ops.cp_utils import all_gather_cp, get_freqs_cis_for_cp
+from miles_plugins.models.deepseek_v4.ops.cp_utils import all_gather_cp, get_freqs_cis_for_cp, get_q_positions_for_cp
 from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import batched_indexer_fwd
 from miles_plugins.models.deepseek_v4.ops.qat import fp8_simulate_qat
 from miles_plugins.models.deepseek_v4.ops.rope import apply_rotary_emb, wrapped_precompute_freqs_cis
@@ -144,21 +145,18 @@ class V4Indexer(MegatronModule):
         weights = (weights * (self.index_n_heads**-0.5) * softmax_scale).float()
 
         # Balance the causal scoring work over contiguous CP (miles_plugins.models.cp_row_balance).
-        # Replay records and replays this rank's own rows, so it keeps the unbalanced path.
-        exchange = None
-        if cp_size > 1 and cp_group is not None and not indexer_replay_manager.enabled:
-            # Sent before the compressor, which overlaps it; the key all-gather below shares the
-            # CP communicator, so it starts once the exchange is through.
-            exchange = start_row_exchange(q, weights, thd_layout, cp_group)
-        if exchange is not None:
-            q = weights = None  # the scorer reads the exchanged rows
+        # Replay data holds each rank's own rows, so replay scores them where they are.
+        balance = cp_size > 1 and cp_group is not None and not indexer_replay_manager.enabled
+        # started before the compressor to overlap it; unpacked, its CP all-gathers wait for the exchange
+        exchange = start_row_exchange(q, weights, thd_layout, cp_group, balance=balance)
+        del q, weights  # scored from exchange.wait()
 
         pre_grouped = thd_layout is not None and thd_layout.compressed_group_ids is not None
         k = self.compressor(thd_layout.hidden_compact if pre_grouped else x, thd_layout)
         if k is None:
-            # Nothing to score when no segment reaches compress_ratio; -1 leaves each query
-            # on its sliding window. Only without CP: under CP the compressor gets compacted groups.
-            assert exchange is None, "the compressor returned no keys while rows were in flight"
+            # Nothing to score when no segment reaches compress_ratio; -1 leaves each query on its
+            # sliding window. The compressor returns None only without CP, so no rows are in flight.
+            assert isinstance(exchange, LocalRows), "the compressor returned no keys while rows were in flight"
             return torch.full((bsz, seqlen, self.index_topk), -1, dtype=torch.int32, device=x.device)
 
         if cp_size > 1 and cp_group is not None:
@@ -167,57 +165,44 @@ class V4Indexer(MegatronModule):
                 # Per-row bounds are sequence-major, so reorder the rank-major gather first.
                 k = k.index_select(0, thd_layout.seq_to_rank_row.clamp(min=0).long())
 
-        # Route through the indexer replay manager (flattened to [n_tokens, n_kv], matching the
-        # record/replay convention and the MoE seam) so RL replay can pin the rollout's top-k picks.
-        # get_topk_fn is transparent when disabled, as it is whenever rows were exchanged.
+        # RL replay can pin the rollout's top-k picks here; get_topk_fn is transparent when disabled.
         topk_fn = indexer_replay_manager.get_topk_fn(get_dsa_topk_fn(self.topk_backend), return_probs=False)
         return topk_for_local_rows(
-            q,
-            weights,
-            k,
             exchange,
-            cp_rank=cp_group.rank() if cp_size > 1 and cp_group is not None else 0,
-            thd_layout=thd_layout,
+            k,
+            thd_layout,
             compress_ratio=self.compress_ratio,
             index_topk=self.index_topk,
             topk_fn=topk_fn,
         )
 
 
-def start_row_exchange(q, weights, thd_layout, cp_group) -> RowExchange | None:
-    """Start sending this rank's indexer rows to their scoring ranks; None keeps contiguous CP."""
-    plan = _row_balance_plan(q.shape[0], thd_layout, cp_group, q.device)
+def start_row_exchange(q, weights, thd_layout, cp_group, *, balance: bool) -> RowExchange | LocalRows:
+    """Start sending this rank's indexer rows to their scoring ranks, or keep them if balancing does not pay."""
+    tensors = [q.detach(), weights.detach()]
+    plan = _row_balance_plan(q.shape[0], thd_layout, cp_group, q.device) if balance else None
     if plan is None:
-        return None
-    return send_rows_to_scorers([q.detach(), weights.detach()], plan, cp_group)
+        cp_size = cp_group.size() if cp_group is not None else 1
+        positions = get_q_positions_for_cp(q.shape[0], cp_size=cp_size, cp_group=cp_group, device=q.device)
+        return LocalRows(tensors, positions)
+    return send_rows_to_scorers(tensors, plan, cp_group)
 
 
-def topk_for_local_rows(q, weights, k, exchange, *, cp_rank, thd_layout, compress_ratio, index_topk, topk_fn):
-    """The top-k picks for this rank's rows, in local order.
-
-    Without an ``exchange`` the rows in ``q`` and ``weights`` are scored here. With one, this rank
-    scores the rows it received instead (``q`` and ``weights`` are unused) and each row's picks go
-    back to the rank that owns it.
-    """
-    if exchange is None:
-        rows = q.shape[0]
-        row_start = thd_layout.global_start if thd_layout is not None else cp_rank * rows
-        positions = torch.arange(row_start, row_start + rows, device=k.device)
-    else:
-        q, weights = exchange.wait()
-        positions = exchange.plan.scored_positions
+def topk_for_local_rows(exchange, k, thd_layout, *, compress_ratio, index_topk, topk_fn):
+    """The top-k picks for this rank's rows, in local order, scored on the rank ``exchange`` sent them to."""
+    q, weights = exchange.wait()
     topk_indices = indexer_topk(
         q,
         k,
         weights,
-        positions,
+        exchange.scored_positions,
         thd_layout,
         compress_ratio=compress_ratio,
         index_topk=index_topk,
         topk_fn=topk_fn,
     )
-    # [batch, rows, topk]: exchange along the row dim
-    return topk_indices if exchange is None else exchange.return_to_owners(topk_indices, dim=1)
+    # [batch, rows, topk]: the picks go back along the row dim
+    return exchange.return_to_owners(topk_indices, dim=1)
 
 
 def indexer_topk(q, k, weights, positions, thd_layout, *, compress_ratio, index_topk, topk_fn):
@@ -243,6 +228,7 @@ def indexer_topk(q, k, weights, positions, thd_layout, *, compress_ratio, index_
     index_scores = batched_indexer_fwd(q, k, weights, cu_ks, cu_ke)
     bsz, rows, n_kv = index_scores.shape
     topk_count = min(index_topk, n_kv)
+    # flattened to [n_tokens, n_kv], the record/replay convention shared with the MoE seam
     topk_indices = topk_fn(index_scores.reshape(bsz * rows, n_kv), topk_count)
     return topk_indices.reshape(bsz, rows, topk_count)
 
