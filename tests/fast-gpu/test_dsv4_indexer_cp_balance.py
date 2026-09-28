@@ -5,10 +5,12 @@ Run with:
     torchrun --nproc_per_node=4 tests/fast-gpu/test_dsv4_indexer_cp_balance.py
 
 Each rank runs V4Indexer.forward's two steps around the key gather, start_row_exchange and
-topk_for_local_rows, with and without the exchange. Both must equal the pre-balancing indexer, which
-scores the local rows with contiguous bounds (tests/fast/test_dsv4_thd.py pins the THD bounds to
-running each sample alone): bit for bit for the torch top-k, as sets for flashinfer. Cases: unpacked
-samples (batch 1 and 2) and a THD pack; a pack of equal short documents must skip the exchange.
+topk_for_local_rows, once keeping its rows and once balancing them with a collective on the CP group
+while the rows are in flight. The balanced picks must equal the local ones, bit for bit for the torch
+top-k and as sets for flashinfer; unpacked, the local ones must also equal the pre-balancing
+indexer's (tests/fast/test_dsv4_thd.py pins the THD bounds to running each sample alone). Cases:
+unpacked batch 1 and 2, THD packs with a long document and with odd scored-row counts, and a pack of
+equal short documents, which must skip the exchange.
 """
 
 import os
@@ -23,11 +25,7 @@ from miles_plugins.models.deepseek_v4.ops.kernel.tilelang_indexer_fwd import (
     _make_causal_cu_seqlens,
     batched_indexer_fwd,
 )
-from miles_plugins.models.deepseek_v4.ops.thd_utils import (
-    ThdLayout,
-    compressed_cu_seqlens,
-    get_compress_cu_seqlens_thd,
-)
+from miles_plugins.models.deepseek_v4.ops.thd_utils import ThdLayout, compressed_cu_seqlens
 from miles_plugins.models.deepseek_v4.ops.v4_indexer import start_row_exchange, topk_for_local_rows
 from miles_plugins.models.dsa_topk import get_dsa_topk_fn
 
@@ -72,23 +70,14 @@ def _thd_layout(seq_lens, rank, rank_rows):
     return layout
 
 
-def _unbalanced_topk(q, k, weights, rank, thd_layout, topk_fn):
-    """The indexer before balancing: this rank's own rows, bounds sliced from the contiguous run."""
+def _unbalanced_unpacked_topk(q, k, weights, rank, topk_fn):
+    """The unpacked indexer before balancing: this rank's own rows, bounds sliced from the contiguous run."""
     rank_rows = q.shape[0]
-    if thd_layout is None:
-        cu_ks, cu_ke = _make_causal_cu_seqlens(SEQLEN_GLOBAL, k.shape[0], RATIO, q.device)
-        cu_ks, cu_ke = (
-            cu_ks[rank * rank_rows : (rank + 1) * rank_rows],
-            cu_ke[rank * rank_rows : (rank + 1) * rank_rows],
-        )
-    else:
-        cu_ks, cu_ke = get_compress_cu_seqlens_thd(
-            thd_layout.cu_seqlens,
-            thd_layout.cu_seqlens_compressed,
-            ratio=RATIO,
-            total_tokens=rank_rows,
-            global_start=thd_layout.global_start,
-        )
+    cu_ks, cu_ke = _make_causal_cu_seqlens(SEQLEN_GLOBAL, k.shape[0], RATIO, q.device)
+    cu_ks, cu_ke = (
+        cu_ks[rank * rank_rows : (rank + 1) * rank_rows],
+        cu_ke[rank * rank_rows : (rank + 1) * rank_rows],
+    )
     scores = batched_indexer_fwd(q, k, weights, cu_ks, cu_ke)
     bsz, rows, n_kv = scores.shape
     return topk_fn(scores.reshape(bsz * rows, n_kv), min(TOPK, n_kv)).reshape(bsz, rows, -1)
@@ -102,7 +91,7 @@ def _same_picks(got, expected, topk_backend):
 
 
 def check_picks(rank, world_size, topk_backend, thd_seq_lens=None, bsz=1):
-    """Returns (both of forward's paths give the unbalanced indexer's picks, the exchange ran)."""
+    """Returns (the balanced picks equal the local ones, and unpacked the pre-balancing ones; the exchange ran)."""
     rank_rows = SEQLEN_GLOBAL // world_size
     thd_layout = _thd_layout(thd_seq_lens, rank, rank_rows) if thd_seq_lens else None
     n_kv = int(thd_layout.cu_seqlens_compressed[-1]) if thd_layout else SEQLEN_GLOBAL // RATIO
@@ -111,12 +100,17 @@ def check_picks(rank, world_size, topk_backend, thd_seq_lens=None, bsz=1):
     options = dict(compress_ratio=RATIO, index_topk=TOPK, topk_fn=topk_fn)
     group = dist.group.WORLD
 
-    expected = _unbalanced_topk(q, k, weights, rank, thd_layout, topk_fn)
     kept = start_row_exchange(q, weights, thd_layout, group, balance=False)
     local = topk_for_local_rows(kept, k, thd_layout, **options)
     exchange = start_row_exchange(q, weights, thd_layout, group, balance=True)
+    # in forward the compressor's CP all-gathers queue on this communicator behind the exchange
+    dist.all_reduce(torch.ones(1, device="cuda"), group=group)
     balanced = topk_for_local_rows(exchange, k, thd_layout, **options)
-    picks_equal = _same_picks(local, expected, topk_backend) and _same_picks(balanced, expected, topk_backend)
+
+    picks_equal = _same_picks(balanced, local, topk_backend)
+    if thd_layout is None:
+        expected = _unbalanced_unpacked_topk(q, k, weights, rank, topk_fn)
+        picks_equal = picks_equal and _same_picks(local, expected, topk_backend)
     return picks_equal, isinstance(exchange, RowExchange)
 
 
@@ -140,6 +134,8 @@ def main():
             "pack: long doc + short docs + pad": dict(
                 thd_seq_lens=[long_doc, 1000, 1000, 1000, 1000, 116], bsz=1, expect_exchange=True
             ),
+            # ranks score unequal, odd row counts, so the scorer's last 2-row block runs past the end
+            "pack: odd scored-row counts": dict(thd_seq_lens=[SEQLEN_GLOBAL - 2, 1, 1], bsz=1, expect_exchange=True),
             "pack: equal short docs": dict(thd_seq_lens=[512] * (SEQLEN_GLOBAL // 512), bsz=1, expect_exchange=False),
         }
         passed = True

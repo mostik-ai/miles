@@ -1,10 +1,10 @@
-"""4-layer DeepSeek-V4-Flash RL on four GPUs with context parallelism (miles impl).
+"""Smoke run of DeepSeek-V4-Flash's CP path: the 4-layer RL case on four GPUs (miles impl).
 
-The base 4-layer case (test_deepseek_v4_flash_4layer_ci.py) at TP2 with sequence parallelism, CP2
-with the all-gather CP split, EP4. Each micro-batch holds one unpacked sample, so the prune's CSA
-layer always takes the load-balanced indexer path (each CP rank scores the paired row chunks and
-returns the top-k picks), and the window, CSA and HCA layers all all-gather their KV across CP. The
-engine runs without CP, so the train-rollout log-prob and KL gates check the whole CP path against it.
+The base case (test_deepseek_v4_flash_4layer_ci.py) at TP2 with sequence parallelism, CP2 with the
+all-gather CP split, EP4. Each micro-batch holds one unpacked sample, so the CSA layer always takes
+the load-balanced indexer path. The run catches crashes, hangs and train-side nondeterminism, not
+wrong picks: its train-rollout metrics are tracked but not gated, and short GSM8K samples have fewer
+compressed keys than the top-k keeps. tests/fast-gpu/test_dsv4_indexer_cp_balance.py checks the picks.
 """
 
 import dataclasses
