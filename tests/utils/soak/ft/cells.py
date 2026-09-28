@@ -22,6 +22,4 @@ def cell_type_of(cell: Cell) -> str:
 
 
 def _has_condition(cell: Cell, condition_type: str, status: TriState) -> bool:
-    return any(
-        condition.type == condition_type and condition.status is status for condition in cell.status.conditions
-    )
+    return any(condition.type == condition_type and condition.status is status for condition in cell.status.conditions)
