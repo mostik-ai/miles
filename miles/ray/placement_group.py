@@ -46,6 +46,8 @@ from miles.utils.workers.worker_provider.static import wait_static_addrs_ready
 
 logger = logging.getLogger(__name__)
 
+_CHECKSUM_RETRY_INTERVAL_SECONDS: float = 2.0
+
 
 @ray.remote(num_gpus=1)
 class InfoActor:
@@ -357,8 +359,8 @@ async def _maybe_log_inference_engine_weight_checksums(
     }
     try:
         checked = await asyncio.wait_for(
-            inference_controller.check_weights(
-                action="checksum", model_id=trainer_model_id, cell_ids=sorted(published)
+            _check_weights_until_answered(
+                inference_controller, model_id=trainer_model_id, cell_ids=sorted(published)
             ),
             timeout=args.update_weight_engine_request_timeout,
         )
@@ -385,6 +387,17 @@ async def _maybe_log_inference_engine_weight_checksums(
         )
     except Exception:
         logger.exception("Could not record inference engine checksum observation")
+
+
+async def _check_weights_until_answered(
+    inference_controller: BaseWorkerHandle, *, model_id: str | None, cell_ids: list[str]
+) -> list:
+    while True:
+        try:
+            return await inference_controller.check_weights(action="checksum", model_id=model_id, cell_ids=cell_ids)
+        except Exception:
+            logger.warning("Inference engine checksum observation failed, retrying", exc_info=True)
+            await asyncio.sleep(_CHECKSUM_RETRY_INTERVAL_SECONDS)
 
 
 # TODO: move (when reorganizing files)

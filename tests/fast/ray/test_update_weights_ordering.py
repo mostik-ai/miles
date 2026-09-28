@@ -523,6 +523,39 @@ class TestTheChecksumRecordKeepsOnlyThisPublication:
         assert timeouts == [60.0]
         assert len(self._recorded(event_log_dir)) == 1
 
+    async def test_a_transient_engine_error_is_retried_until_the_checksums_arrive(
+        self, event_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An engine that stalls for a moment and resets one checksum call must not cost the publication its record."""
+        monkeypatch.setattr("miles.ray.placement_group._CHECKSUM_RETRY_INTERVAL_SECONDS", 0.0)
+        calls: list[int] = []
+
+        async def _reset_once(**_kwargs: object) -> list[tuple[ServerCellMetadata, dict[str, Any]]]:
+            calls.append(len(calls))
+            if len(calls) == 1:
+                raise ConnectionResetError("engine stalled")
+            return _checksum_response([{"w": "new"}])
+
+        await self._log(check_weights=_reset_once, snapshot={"cell-0": "incarnation-0"})
+
+        assert len(calls) == 2
+        assert len(self._recorded(event_log_dir)) == 1
+
+    async def test_an_engine_that_keeps_failing_is_deadlined_without_a_record(
+        self, event_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Retries stay within the request budget, so a dead engine leaves the missing record for the analyzer."""
+        monkeypatch.setattr("miles.ray.placement_group._CHECKSUM_RETRY_INTERVAL_SECONDS", 0.001)
+
+        async def _always_fail(**_kwargs: object) -> None:
+            raise ConnectionResetError("engine gone")
+
+        await self._log(
+            check_weights=_always_fail, snapshot={"cell-0": "incarnation-0"}, update_weight_engine_request_timeout=0.05
+        )
+
+        assert self._recorded(event_log_dir) == []
+
     async def test_a_hanging_engine_is_deadlined_without_failing_the_update(self, event_log_dir: Path) -> None:
         """Evidence collection is best effort, so a stuck engine must not block or fail publication."""
 
