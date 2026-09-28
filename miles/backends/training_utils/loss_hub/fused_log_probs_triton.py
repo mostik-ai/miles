@@ -40,12 +40,11 @@ class KernelConfigs:
 # for the GPU it runs on. Bandwidth as a share of a device copy on the same GPU:
 #   sm90 (H100, H200), on H200: statistics 101%, gradient 93%, zeroing 103%
 #   sm100 (B200, GB200), on B200: statistics 89%, gradient 89%, zeroing 108%
-#   sm103 (B300, GB300): statistics and gradient measured on B300 with the first version of these
-#     kernels; the zeroing shape follows sm90 and sm100, which both pick 16 warps
+#   sm103 (B300, GB300), on GB300: statistics 89%, gradient 90%, zeroing 107%
 _MEASURED_CONFIGS = {
     "sm90": KernelConfigs(stats=LaunchConfig(2048, 1), grad=LaunchConfig(4096, 1), zero=LaunchConfig(2048, 16)),
     "sm100": KernelConfigs(stats=LaunchConfig(2048, 1), grad=LaunchConfig(8192, 2), zero=LaunchConfig(2048, 16)),
-    "sm103": KernelConfigs(stats=LaunchConfig(2048, 2), grad=LaunchConfig(2048, 4), zero=LaunchConfig(2048, 16)),
+    "sm103": KernelConfigs(stats=LaunchConfig(2048, 1), grad=LaunchConfig(8192, 2), zero=LaunchConfig(1024, 16)),
 }
 # A family nobody has measured yet (gfx942: MI300X; gfx950: MI350X, MI355X) runs the B200 shape:
 # every shape gives the same results, only the speed differs.
