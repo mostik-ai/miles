@@ -41,7 +41,7 @@ def _reference_plan(seq_lens, cp_rank, cp_size, min_gain):
     cost = (offset + 1).double()
     contiguous = torch.zeros(cp_size, dtype=torch.float64).index_add_(0, owner, cost)
     balanced = torch.zeros(cp_size, dtype=torch.float64).index_add_(0, scorer, cost)
-    if balanced.max() > (1 - min_gain) * contiguous.max():
+    if balanced.max() > (1 - min_gain) * contiguous.max() or not torch.bincount(scorer, minlength=cp_size).all():
         return None
     local_scorer = scorer[cp_rank * rank_rows : (cp_rank + 1) * rank_rows]
     mine = scorer == cp_rank
@@ -140,6 +140,12 @@ def test_chunk_pairing_pairs_early_with_late():
 def test_a_pack_of_equal_short_documents_keeps_the_contiguous_layout():
     """Each rank already holds the same mix of positions, so moving rows would only add traffic."""
     assert all(plan is None for plan in _plans([512] * 64, 4))
+
+
+def test_a_plan_never_leaves_a_rank_without_rows():
+    """Documents shorter than 2cp leave chunks empty; a rank with none of them has nothing to score."""
+    seq_lens = [1] * 235 + [2] * 76 + [5] * 25
+    assert all(plan is None for plan in _plans(seq_lens, 4))
 
 
 def test_a_long_document_in_a_pack_is_balanced():

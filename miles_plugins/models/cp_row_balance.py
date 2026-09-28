@@ -65,9 +65,9 @@ def plan_causal_row_balance(
     """The balanced exchange for a stream of ``seq_lens`` split contiguously over ``cp_size`` ranks.
 
     ``seq_lens`` must tile the whole stream, padding included, and the stream must split evenly
-    over the ranks. Returns None when balancing would not lower the busiest rank's causal cost
-    (``offset + 1`` per row) by ``min_gain``. Host work is proportional to sequences times ranks;
-    the row indices are generated on ``device``.
+    over the ranks. Returns None when balancing would leave a rank with no rows to score, or would
+    not lower the busiest rank's causal cost (``offset + 1`` per row) by ``min_gain``. Host work is
+    proportional to sequences times ranks; the row indices are generated on ``device``.
     """
     if min(seq_lens) < 0:
         raise ValueError(f"sequence lengths must be non-negative, got {min(seq_lens)}")
@@ -130,12 +130,14 @@ def _split_at_rank_boundaries(chunks: _Intervals, rank_rows: int) -> _Intervals:
 
 
 def _worth_balancing(pieces: _Intervals, cp_size: int, min_gain: float) -> bool:
-    """Whether scoring on ``scorer`` cuts the busiest rank's causal cost by ``min_gain``."""
+    """Whether every rank gets rows to score and the busiest rank's causal cost drops by ``min_gain``."""
     lo, hi = pieces.offset, pieces.offset + pieces.rows
     cost = (hi * (hi + 1) - lo * (lo + 1)) // 2  # sum of offset + 1 over each piece
     contiguous = torch.zeros(cp_size, dtype=torch.int64).index_add_(0, pieces.owner, cost).max().item()
     balanced = torch.zeros(cp_size, dtype=torch.int64).index_add_(0, pieces.scorer, cost).max().item()
-    return balanced <= (1 - min_gain) * contiguous
+    # a rank left without rows would launch the scorer on an empty grid, which TileLang rejects
+    scored_rows = torch.zeros(cp_size, dtype=torch.int64).index_add_(0, pieces.scorer, pieces.rows)
+    return bool(scored_rows.all()) and balanced <= (1 - min_gain) * contiguous
 
 
 def _plan_for_rank(
