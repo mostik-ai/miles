@@ -119,6 +119,12 @@ class TestGetGsm8kTrainArgs:
         assert _value_of(fully_async, "--sample-ownership-grace-steps") == "10"
         assert "--sample-ownership-grace-steps" not in get_gsm8k_train_args(seed=7, num_rollout=30, test_name="t")
 
+    def test_only_a_fully_async_run_widens_the_logprob_check_tolerance(self) -> None:
+        """Samples lag the trainer by 2-3 versions only in fully-async mode, so only it gets the wider tolerance."""
+        fully_async = get_gsm8k_train_args(seed=7, num_rollout=30, test_name="t", fully_async=True)
+        assert _value_of(fully_async, "--ci-logprobs-checker-abs-tol") == "0.1"
+        assert "--ci-logprobs-checker-abs-tol" not in get_gsm8k_train_args(seed=7, num_rollout=30, test_name="t")
+
 
 class TestPrepareGsm8kRun:
     def test_the_run_is_bound_to_one_fresh_dump_dir_and_its_evidence(

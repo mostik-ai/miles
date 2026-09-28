@@ -42,6 +42,7 @@ ROLLOUT_GPUS: int = 4
 CONTEXT_PARALLEL_SIZE: int = 2
 ROLLOUT_GPUS_PER_ENGINE: int = 1
 FULLY_ASYNC_SAMPLE_OWNERSHIP_GRACE_STEPS: int = 10
+FULLY_ASYNC_LOGPROBS_CHECKER_ABS_TOL: float = 0.1
 
 
 class Gsm8kLaunchSpec(FrozenStrictBaseModel):
@@ -242,6 +243,12 @@ def get_gsm8k_train_args(
     )
     if fully_async:
         ci_args += f"--sample-ownership-grace-steps {FULLY_ASYNC_SAMPLE_OWNERSHIP_GRACE_STEPS} "
+        # Fully-async samples are generated 2-3 weight versions behind the trainer, so the train/rollout
+        # log-prob gap measures policy movement over that lag, not a weight mismatch. Over 250 rollouts the
+        # policy occasionally moves fast (train_rollout_kl 0.001 -> 0.017) and the gap reached 0.043 while
+        # every engine and trainer checksum still matched; the no-fault run peaked at 0.0072. Weight
+        # correctness stays covered by the checksum analyzer rules.
+        ci_args += f"--ci-logprobs-checker-abs-tol {FULLY_ASYNC_LOGPROBS_CHECKER_ABS_TOL} "
 
     misc_args = (
         # default dropout in megatron is 0.1

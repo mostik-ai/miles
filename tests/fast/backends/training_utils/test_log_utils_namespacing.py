@@ -146,3 +146,47 @@ class TestLogRolloutData:
 
         with pytest.raises(AssertionError, match="CI check failed"):
             log_utils.log_rollout_data(rollout_id=0, args=args, rollout_data=rollout_data)
+
+    @pytest.mark.parametrize(("abs_tol", "passes"), [(0.03, False), (0.1, True)])
+    def test_the_rollout_logprob_check_uses_the_configured_tolerance(
+        self, monkeypatch: pytest.MonkeyPatch, abs_tol: float, passes: bool
+    ) -> None:
+        """A 0.05 train/rollout gap fails the default tolerance and passes a run's wider one."""
+        parallel_state = SimpleNamespace(
+            tp=SimpleNamespace(rank=0),
+            cp=SimpleNamespace(size=1),
+            intra_dp=SimpleNamespace(size=1),
+            effective_dp_cp=SimpleNamespace(rank=0, size=1, gloo_groups_inner_to_outer=[]),
+            is_pp_last_stage=True,
+        )
+        monkeypatch.setattr(parallel, "_parallel_state", parallel_state)
+        monkeypatch.setattr(
+            log_utils.MultiPGUtil, "gather_object", staticmethod(lambda obj, groups_inner_to_outer: [obj])
+        )
+        monkeypatch.setattr(log_utils.tracking, "log", lambda args, payload, step_key: None)
+        rollout_data = {
+            "total_lengths": [2],
+            "response_lengths": [2],
+            "loss_masks": [torch.tensor([1, 1], dtype=torch.int32)],
+            "log_probs": [torch.tensor([-0.15, -0.15])],
+            "rollout_log_probs": [torch.tensor([-0.10, -0.10])],
+        }
+        args = Namespace(
+            ci_test=True,
+            ci_disable_logprobs_checker=False,
+            ci_logprobs_checker_abs_tol=abs_tol,
+            trainer_model_id=None,
+            true_on_policy_mode=False,
+            use_rollout_routing_replay=False,
+            qkv_format="thd",
+            wandb_always_use_train_step=False,
+            log_multi_turn=False,
+            log_passrate=False,
+            log_correct_samples=False,
+        )
+
+        if passes:
+            log_utils.log_rollout_data(rollout_id=0, args=args, rollout_data=rollout_data)
+        else:
+            with pytest.raises(AssertionError, match="rollout_log_probs"):
+                log_utils.log_rollout_data(rollout_id=0, args=args, rollout_data=rollout_data)

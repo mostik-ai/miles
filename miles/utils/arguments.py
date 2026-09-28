@@ -2632,6 +2632,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 action="store_true",
             )
             parser.add_argument(
+                "--ci-logprobs-checker-abs-tol",
+                type=float,
+                default=0.03,
+                help="Absolute tolerance between the batch-mean train and rollout log probs in the CI check.",
+            )
+            parser.add_argument(
                 "--ci-disable-weight-update-checker",
                 action="store_true",
             )
