@@ -15,7 +15,7 @@ from miles.utils.types import Sample
 
 ARGS = Namespace(balance_data=False, multi_lora_n_adapters=0)
 
-KEY = "orl_bigsender_capture"
+KEY = "coral_bigsender_capture"
 
 
 def _sample(index: int) -> Sample:
