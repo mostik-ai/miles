@@ -18,7 +18,7 @@ from starlette.responses import Response
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.session.config import SessionServerConfig
-from miles.rollout.session.conditioning import apply_conditioning, stamp_conditioning
+from miles.rollout.session.conditioning import apply_conditioning, assert_one_conditioning, stamp_conditioning
 from miles.rollout.session.errors import (
     SessionNotFoundError,
     TokenizationError,
@@ -377,7 +377,7 @@ class SessionCore:
         # The hook may materialize an external artifact and name it on the request, so it must
         # run before the proxy and outside the lock: producing that artifact is not instant.
         if self.conditioning_hook is not None:
-            session.conditioning_ref = await apply_conditioning(
+            reference = await apply_conditioning(
                 self.conditioning_hook,
                 session_id=session_id,
                 sequence=call_sequence,
@@ -385,6 +385,10 @@ class SessionCore:
                 request_body=request_body,
                 previous=session.conditioning_ref,
             )
+            # Two overlapping calls of one session both run the hook, so the read-compare-write
+            # of the session's single reference happens under the lock, not around the await.
+            async with session.lock:
+                session.conditioning_ref = assert_one_conditioning(session_id, session.conditioning_ref, reference)
         proxy_body = json.dumps(request_body).encode()
 
         # --- Phase 2: proxy to backend (NO lock held) ---

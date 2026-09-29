@@ -70,6 +70,13 @@ async def apply_conditioning(
         return previous
     if not isinstance(reference, dict):
         raise TypeError(f"conditioning hook must return a JSON object or None, got {type(reference).__name__}")
+    return assert_one_conditioning(session_id, previous, reference)
+
+
+def assert_one_conditioning(session_id: str, previous, reference):
+    """Every sample assembled from one session carries one reference; hold the session lock."""
+    if reference is None:
+        return previous
     if previous is not None and previous != reference:
         raise ValueError(
             f"session {session_id} changed its conditioning reference during the session "
