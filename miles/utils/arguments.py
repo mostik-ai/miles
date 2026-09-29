@@ -3611,6 +3611,10 @@ def miles_validate_args(args):
         )
 
     if args.update_weight_parameter_scope == "trainable":
+        from miles.backends.training_utils.weight_update.hf_weight_iterator.trainable_scope import (
+            uses_mm_tower_passthrough,
+        )
+
         # The selection is made where the exported units carry their Megatron source parameters.
         assert args.train_backend == "megatron" and getattr(args, "megatron_to_hf_mode", None) == "bridge", (
             "--update-weight-parameter-scope trainable requires --train-backend megatron with "
@@ -3623,6 +3627,12 @@ def miles_validate_args(args):
         assert not args.check_weight_update_equal, (
             "--check-weight-update-equal compares the engines against the full trainer state, which "
             "a trainable-only sync deliberately no longer sends."
+        )
+        assert not uses_mm_tower_passthrough(args), (
+            "--update-weight-parameter-scope trainable does not support the multimodal tower "
+            "passthrough: those frozen tower tensors have no trainer-side parameter, so the scope "
+            "would stop re-sending them, and the engine re-reads them after an offload. Drop the "
+            "scope, or make the towers real trainer parameters."
         )
 
     if args.colocate:

@@ -17,6 +17,20 @@ import torch
 
 PARAMETER_SCOPES = ("all", "trainable")
 
+# The custom provider whose exporters append the frozen vision/audio tower tensors read from the
+# boot checkpoint (``_iter_mm_tower_units``). Those units have no trainer-side parameter at all,
+# so this scope would drop them — but they are re-sent for the engine's sake, not the trainer's.
+MM_TOWER_PROVIDER = "inkling_mm_model_provider"
+
+
+def uses_mm_tower_passthrough(args) -> bool:
+    """True when the weight stream carries the frozen multimodal tower units from the checkpoint.
+
+    They are a source-less passthrough with an engine-side reason to exist (the engine loses the
+    unregistered towers across an offload), which trainability cannot express either way: the
+    trainable scope refuses the combination instead of silently dropping or silently keeping."""
+    return MM_TOWER_PROVIDER in (getattr(args, "custom_model_provider_path", None) or "")
+
 
 def local_trainable_global_names(conversion_tasks: Iterable) -> set[str]:
     """Global Megatron names of the parameters this rank owns and trains.

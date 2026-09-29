@@ -1,7 +1,8 @@
 """Unit tests for the opt-in trainable parameter scope of the base-weight stream.
 
-Covers the rank agreement that turns per-rank ``requires_grad`` into one selection, and the
-late unit filter that the backend-neutral iterator applies after atomic-group assembly.
+Covers the argument-level backend contract, the cross-rank agreement that turns per-rank
+``requires_grad`` into one selection, and the late unit filter that the backend-neutral iterator
+applies after atomic-group assembly.
 """
 
 from tests.ci.ci_register import register_cpu_ci
@@ -9,6 +10,7 @@ from tests.ci.ci_register import register_cpu_ci
 register_cpu_ci(est_time=60, suite="stage-a-cpu", labels=[])
 
 
+import argparse
 from argparse import Namespace
 from types import SimpleNamespace
 
@@ -23,7 +25,60 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator.bucketing im
 from miles.backends.training_utils.weight_update.hf_weight_iterator.trainable_scope import (
     local_trainable_global_names,
     trainable_source_names,
+    uses_mm_tower_passthrough,
 )
+from miles.utils.arguments import get_miles_extra_args_provider, miles_validate_args
+
+
+def _validated_args(argv: list[str]) -> Namespace:
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+    args = parser.parse_args([*argv, "--rollout-batch-size", "64", "--num-rollout", "1"])
+    miles_validate_args(args)
+    return args
+
+
+class TestBackendContract:
+    """Which configurations may ask for a trainable-only sync at all."""
+
+    def test_the_default_scope_needs_nothing(self):
+        assert _validated_args([]).update_weight_parameter_scope == "all"
+
+    def test_the_scope_requires_the_bridge_exporter(self):
+        """Only the Megatron-Bridge export reports which parameter an exported tensor came from;
+        the raw converter would have to guess, so it is refused instead of silently sending all."""
+        with pytest.raises(AssertionError, match="megatron-to-hf-mode bridge"):
+            _validated_args(["--update-weight-parameter-scope", "trainable"])
+
+        args = _validated_args(
+            ["--update-weight-parameter-scope", "trainable", "--megatron-to-hf-mode", "bridge"]
+        )
+        assert args.update_weight_parameter_scope == "trainable"
+
+    def test_the_full_weight_equality_checker_is_refused(self):
+        """It compares the engines against the complete trainer state, which this scope stops sending."""
+        with pytest.raises(AssertionError, match="check-weight-update-equal"):
+            _validated_args(
+                [
+                    "--update-weight-parameter-scope",
+                    "trainable",
+                    "--megatron-to-hf-mode",
+                    "bridge",
+                    "--check-weight-update-equal",
+                ]
+            )
+
+    def test_the_multimodal_tower_passthrough_is_refused(self):
+        """The tower tensors are a source-less passthrough re-sent for the engine, which loses the
+        unregistered towers across an offload. Trainability cannot express that, so the run stops
+        at argument time rather than quietly dropping them from every sync."""
+        tower = ["--custom-model-provider-path", "pkg.mod.inkling_mm_model_provider"]
+        scope = ["--update-weight-parameter-scope", "trainable", "--megatron-to-hf-mode", "bridge"]
+        with pytest.raises(AssertionError, match="multimodal tower passthrough"):
+            _validated_args([*scope, *tower])
+
+        ordinary = _validated_args([*scope, "--custom-model-provider-path", "pkg.mod.provider"])
+        assert not uses_mm_tower_passthrough(ordinary)
 
 
 def _task(param_name, global_param_name=None, *, requires_grad=None):
@@ -80,6 +135,69 @@ class TestRankAgreement:
 
     def test_a_fully_frozen_rank_contributes_nothing(self):
         assert local_trainable_global_names([_task("decoder.weight", requires_grad=False)]) == set()
+
+
+class TestAgreementGroup:
+    """Which collective the Bridge iterator agrees on, and when it runs one at all."""
+
+    def _bridge(self, monkeypatch, *, parameter_scope="trainable", gather_pp=True, other_ranks=()):
+        from miles.backends.megatron_utils.update_weight import hf_weight_iterator_bridge as module
+
+        calls = {}
+        world = SimpleNamespace(name="gloo-world")
+
+        def _all_gather_object(gathered, local, group):
+            calls["group"] = group
+            gathered[0] = local
+            for index, names in enumerate(other_ranks, start=1):
+                gathered[index] = set(names)
+
+        monkeypatch.setattr(module, "get_gloo_group", lambda: world)
+        monkeypatch.setattr(
+            module,
+            "dist",
+            SimpleNamespace(
+                get_world_size=lambda group: 1 + len(other_ranks),
+                all_gather_object=_all_gather_object,
+            ),
+        )
+        iterator = SimpleNamespace(
+            parameter_scope=parameter_scope,
+            placement=WeightUpdatePlacement(gather_pp=gather_pp),
+        )
+        return module.HfWeightIteratorBridge._trainable_source_names, iterator, calls, world
+
+    def test_the_ranks_agree_over_the_gloo_world_group(self, monkeypatch):
+        """The export is PP-gathered, so this rank exports names whose parameters live on other
+        pipeline stages: agreeing inside a TP or PP subgroup would drop exactly those."""
+        select, iterator, calls, world = self._bridge(
+            monkeypatch, other_ranks=[{"decoder.layers.1.self_attn.weight"}]
+        )
+        tasks = [
+            _task("channel.gate", requires_grad=True),
+            _task("decoder.layers.1.self_attn.weight"),
+            _task("decoder.layers.1.mlp.weight"),
+        ]
+
+        selected = select(iterator, tasks)
+
+        assert calls["group"] is world
+        assert selected == {"channel.gate", "decoder.layers.1.self_attn.weight"}
+
+    def test_the_default_scope_runs_no_collective(self, monkeypatch):
+        """An `all` sync must not pay for — or risk hanging on — an agreement it never reads."""
+        select, iterator, calls, _world = self._bridge(monkeypatch, parameter_scope="all")
+
+        assert select(iterator, [_task("channel.gate", requires_grad=True)]) == set()
+        assert calls == {}
+
+    def test_a_pp_local_export_is_refused(self, monkeypatch):
+        """World agreement is only right because the export is PP-gathered; a PP-local exporter
+        would have to agree within its own stage."""
+        select, iterator, _calls, _world = self._bridge(monkeypatch, gather_pp=False)
+
+        with pytest.raises(AssertionError, match="PP-gathered"):
+            select(iterator, [_task("channel.gate", requires_grad=True)])
 
 
 class _StubIterator(HfWeightIteratorBase):

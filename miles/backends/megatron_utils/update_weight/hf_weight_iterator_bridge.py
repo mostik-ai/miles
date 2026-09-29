@@ -69,9 +69,19 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
 
         Read from the vanilla tasks, before ``_process_conversion_tasks`` substitutes the actor's
         weights: those tensors carry no ``requires_grad``. Only the owning rank can see it, so the
-        ranks agree on global names first and each maps them back onto its own task names."""
+        ranks agree on global names first and each maps them back onto its own task names.
+
+        The agreement group is the **Gloo world group** (``get_gloo_group()``), not a PP/TP
+        subgroup: this exporter always runs fully PP-gathered (``forced_placement.gather_pp``), so
+        every rank exports the whole model's HF names and needs the trainability of parameters no
+        subgroup of it owns. The contributors are the owner tasks — the ones with a real
+        ``param_weight`` — and every rank contributes, including a rank that owns nothing."""
         if self.parameter_scope != "trainable":
             return set()
+        assert self.placement.gather_pp, (
+            "the trainable scope agrees across the world group because the export is PP-gathered; "
+            "a PP-local export would have to agree within its own pipeline stage instead"
+        )
         group = get_gloo_group()
         gathered: list = [None] * dist.get_world_size(group=group)
         dist.all_gather_object(gathered, local_trainable_global_names(conversion_tasks), group=group)

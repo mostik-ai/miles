@@ -135,15 +135,24 @@ so a quantized weight is never separated from its scale companion, and every ran
 exporter in lockstep — the trainer therefore still gathers and converts the frozen parameters, it
 only stops transferring them. Selecting nothing fails the sync instead of silently updating nothing.
 
+`requires_grad` is readable only on the rank that owns a parameter, while the Bridge export is
+PP-gathered and names the whole model on every rank. The ranks therefore agree first, on the
+**Gloo world group** (`get_gloo_group()`), contributed to by the owner tasks — the conversion
+tasks with a real `param_weight` — and each rank then maps the one agreed set of global names back
+onto its own exported source names. The agreement runs only when the scope is `trainable`.
+
 A tensor with no trainer-side source parameter is frozen by definition and is not sent: that covers
-checkpoint passthrough tensors a bridge copies from the HF source, and the frozen multimodal tower
-units the Megatron iterators append to the stream.
+the checkpoint passthrough tensors a bridge copies from the HF source. The frozen multimodal tower
+units the Megatron iterators append to the stream are the one source-less case that is *not*
+silently dropped: they are re-sent for the engine's sake (it loses the unregistered towers across
+an offload), not the trainer's, so the scope refuses that model instead of changing its behavior.
 
 Current `main` requires `--train-backend megatron --megatron-to-hf-mode bridge`, because only the
-Megatron-Bridge exporter reports the source parameter of an exported tensor. It rejects LoRA
-adapter sync (already adapter-only) and `--check-weight-update-equal` (which compares engines
-against the full trainer state). A parallel layout where one exported source name covers both a
-trainable and a frozen parameter is rejected rather than guessed.
+Megatron-Bridge exporter reports the source parameter of an exported tensor. It also rejects LoRA
+adapter sync (already adapter-only), `--check-weight-update-equal` (which compares engines against
+the full trainer state), and the multimodal tower passthrough above. A parallel layout where one
+exported source name covers both a trainable and a frozen parameter is rejected rather than
+guessed.
 
 ### Disk-delta publication and activation
 

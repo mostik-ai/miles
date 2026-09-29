@@ -20,6 +20,7 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import (
     resolve_placement,
 )
 from miles.backends.training_utils.weight_update.hf_weight_iterator.atomic_groups import get_hf_atomic_update_groups
+from miles.backends.training_utils.weight_update.hf_weight_iterator.trainable_scope import uses_mm_tower_passthrough
 from miles.utils.lora.utils import is_lora_weight_name
 
 logger = logging.getLogger(__name__)
@@ -152,7 +153,7 @@ def _iter_mm_tower_units(args, *, materialize):
     Goes away when the towers become real megatron params (Kimi-style) or the
     engine keeps them across offload."""
     global _MM_TOWER_CACHE
-    if "inkling_mm_model_provider" not in (args.custom_model_provider_path or ""):
+    if not uses_mm_tower_passthrough(args):
         return
     if not materialize:
         return
