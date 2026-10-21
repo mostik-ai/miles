@@ -54,6 +54,15 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
         provider.mtp_detach_heads = True
 
     # numerics (training infra, not model-defining)
+    provider.hidden_dropout = args.hidden_dropout
+    provider.attention_dropout = args.attention_dropout
+    if provider.activation_func is torch.nn.functional.silu:
+        provider.bias_activation_fusion = args.bias_swiglu_fusion
+    elif provider.activation_func is torch.nn.functional.gelu:
+        provider.bias_activation_fusion = args.bias_gelu_fusion
+    provider.moe_permute_fusion = args.moe_permute_fusion
+    provider.moe_router_fusion = args.moe_router_fusion
+
     provider.attention_softmax_in_fp32 = args.attention_softmax_in_fp32
     provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
     provider.fp32_residual_connection = args.fp32_residual_connection
