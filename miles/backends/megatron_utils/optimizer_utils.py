@@ -3,6 +3,14 @@ from megatron.core.optimizer import USING_PYTORCH_OPTIMIZER
 from megatron.core.optimizer.optimizer import ChainedOptimizer, MegatronOptimizer
 
 
+def materialize_optimizer_state(optimizer: MegatronOptimizer) -> None:
+    """Allocate lazy optimizer tensors while startup still uses classic CUDA segments."""
+    for chained in optimizer.chained_optimizers:
+        if chained.is_stub_optimizer or chained.init_state_fn is None:
+            continue
+        chained.init_state_fn(chained.optimizer, chained.config)
+
+
 def reset_optimizer_state(
     optimizer: MegatronOptimizer, *, stream_optimizer_state_to_disk: bool, chunked_optimizer_state_offload: bool
 ) -> None:

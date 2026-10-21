@@ -76,7 +76,7 @@ from .model import (
     train,
 )
 from .named_weights import named_params_and_buffers
-from .optimizer_utils import reset_optimizer_state
+from .optimizer_utils import materialize_optimizer_state, reset_optimizer_state
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import register_replay_list_moe
 
@@ -220,6 +220,8 @@ class MegatronTrainRayActor(TrainRayActor):
         self._checkpointing_context = checkpointing_context
         self.model, self.optimizer, self.opt_param_scheduler = build_model_and_optimizer(args, role=role)
         self._post_init_random_state = RandomState.capture()
+        if args.expandable_training_segments and self.optimizer is not None:
+            materialize_optimizer_state(self.optimizer)
 
         parallel_state = get_parallel_state()
         if parallel_state.cp.size > 1:
@@ -231,7 +233,6 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
 
         verify_megatron_parallel_state(self.model)
-
 
         self._asleep = False
         self._grad_buffer_paused = False
