@@ -1561,6 +1561,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--expandable-training-segments",
+                action="store_true",
+                default=False,
+                help=(
+                    "With expandable_segments:True in PYTORCH_ALLOC_CONF, keep model, gradient and optimizer "
+                    "state and checkpoint staging in classic segments, and serve only training's transient "
+                    "memory from expandable ones, which do not fragment. The persistent checkpoint worker "
+                    "receives state over CUDA IPC, which for expandable segments needs pidfd_getfd, forbidden "
+                    "in some containers."
+                ),
+            )
+            parser.add_argument(
                 "--save-interval-minutes",
                 type=float,
                 default=None,

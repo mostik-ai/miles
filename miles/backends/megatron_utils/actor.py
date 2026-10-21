@@ -113,6 +113,11 @@ class MegatronTrainRayActor(TrainRayActor):
         indep_dp_info: IndepDPInfo,
         indep_dp_store_addr: str | None,
     ) -> int | None:
+        if args.expandable_training_segments:
+            # Switching expandable segments on at runtime takes effect only if the process started with them.
+            if "expandable_segments:True" not in os.environ.get("PYTORCH_ALLOC_CONF", ""):
+                raise ValueError("--expandable-training-segments needs expandable_segments:True in PYTORCH_ALLOC_CONF")
+            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
         self.weight_updater: WeightUpdater | None = None
         self.snapshot_publisher: SnapshotPublisher | None = None
         monkey_patch_torch_dist()
@@ -264,6 +269,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self.prof.on_init_end()
 
+        if self.args.expandable_training_segments:
+            torch.cuda.memory._set_allocator_settings("expandable_segments:True")
         return load_output.start_rollout_id
 
     def _init_training_state(self) -> None:
@@ -826,14 +833,23 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self._finalize_pending_async_save()
 
-        save(
-            rollout_id,
-            self.model,
-            self.optimizer,
-            self.opt_param_scheduler,
-            checkpointing_context=self._checkpointing_context,
-            snapshot_publisher=self.snapshot_publisher,
-        )
+        staging = self.args.expandable_training_segments
+        if staging:
+            # Release free expandable blocks first, so the save's own tensors take classic segments too.
+            torch.cuda.empty_cache()
+            torch.cuda.memory._set_allocator_settings("expandable_segments:False")
+        try:
+            save(
+                rollout_id,
+                self.model,
+                self.optimizer,
+                self.opt_param_scheduler,
+                checkpointing_context=self._checkpointing_context,
+                snapshot_publisher=self.snapshot_publisher,
+            )
+        finally:
+            if staging:
+                torch.cuda.memory._set_allocator_settings("expandable_segments:True")
 
         if self.args.save_hf is not None and self.role == "actor":
             assert self.snapshot_publisher is not None, "HF export requires a snapshot publisher"
