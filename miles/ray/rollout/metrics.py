@@ -34,16 +34,18 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics: dict[str, Any] 
         log_dict[f"eval/{key}-none_reward_ratio"] = num_none / len(rewards) if len(rewards) > 0 else 0.0
         if num_none:
             logger.warning(
-                f"eval/{key}: {num_none}/{len(rewards)} samples have reward=None (likely errored/aborted trials); treating as 0.0 for metrics."
+                f"eval/{key}: {num_none}/{len(rewards)} samples have reward=None (likely errored/aborted trials); excluding from mean."
             )
-            rewards = [0.0 if r is None else r for r in rewards]
-        log_dict[f"eval/{key}"] = sum(rewards) / len(rewards) if len(rewards) > 0 else 0.0
+            rewards = [r for r in rewards if r is not None]
+        if rewards:
+            log_dict[f"eval/{key}"] = sum(rewards) / len(rewards)
         if (samples := data[key].get("samples")) is not None:
             log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), f"eval/{key}/")
         if "truncated" in data[key]:
             truncated = data[key]["truncated"]
             log_dict[f"eval/{key}-truncated_ratio"] = sum(truncated) / len(truncated)
-        if args.log_passrate:
+        # Filtering individual rewards loses pass@k group boundaries.
+        if args.log_passrate and not num_none and rewards:
             log_dict |= dict_add_prefix(
                 compute_pass_rate(
                     flat_rewards=rewards,
@@ -251,7 +253,12 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
         rewards = [sample.get_reward_value(args) for sample in samples]
         return len(rewards) == 0 or all(rewards[0] == r for r in rewards)
 
-    all_sample_groups = group_by(all_samples, lambda s: s.group_index)
+    # Invalid rewards are not zero-reward groups; exclude them from this statistic.
+    all_sample_groups = {
+        key: group
+        for key, group in group_by(all_samples, lambda s: s.group_index).items()
+        if all(isinstance(sample.get_reward_value(args), Number) for sample in group)
+    }
     interesting_sample_groups = [g for g in all_sample_groups.values() if _is_zero_std(g)]
 
     interesting_rewards = [str(round(g[0].get_reward_value(args), 1)) for g in interesting_sample_groups]
