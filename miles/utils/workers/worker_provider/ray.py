@@ -30,6 +30,10 @@ class RayWorkerProvider(BaseWorkerProvider):
     async def stop_cells(self, *, cell_ids: list[str]) -> None:
         await self._worker_manager_handle.stop_cells.remote(cell_ids)
 
+    # TEMPORARY: paired with stop_cells above, for the engine restart the inference controller drives
+    async def start_cells(self, *, cell_ids: list[str]) -> None:
+        await self._worker_manager_handle.start_cells.remote(cell_ids)
+
     def get_worker_infos(self, *, cell_ids: list[str]) -> list[list[WorkerInfo]]:
         refs = [self._worker_manager_handle.get_worker_infos.remote(cell_id) for cell_id in cell_ids]
         return ray.get(refs)

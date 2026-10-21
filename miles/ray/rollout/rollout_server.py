@@ -116,8 +116,10 @@ class RolloutServer:
 
     @requires_lock
     def _cells_by_gpu_offset(self) -> list[ServerCell]:
-        # a failed engine is left out, so the trainer rebuilds its transfer group without it
-        return sorted((cell for cell in self.server_cells.values() if not cell.is_failed), key=lambda cell: cell.meta.gpu_offset)
+        # only started engines: a failed one is left out, so the trainer rebuilds its transfer group without it, and
+        # a replacement still starting joins a later update
+        ready = (cell for cell in self.server_cells.values() if cell.is_pending_weights_or_serving)
+        return sorted(ready, key=lambda cell: cell.meta.gpu_offset)
 
     @requires_lock
     async def add_cell(self, cell_meta: ServerCellMetadata):

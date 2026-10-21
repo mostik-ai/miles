@@ -40,6 +40,8 @@ from miles.utils.workers.worker_provider.utils import apply_cell_observation
 logger = logging.getLogger(__name__)
 
 TICK_INTERVAL_SECONDS = 5.0
+RESTART_BACKOFF_SECONDS = 5.0
+RESTART_BACKOFF_MAX_SECONDS = 300.0
 CELL_TICK_TIMEOUT_SECONDS = 120.0
 CELLS_READY_POLL_INTERVAL_SECONDS = 2.0
 CELLS_READY_TIMEOUT_SECONDS = 3600.0
@@ -71,6 +73,7 @@ class InferenceController:
         self.expected_checksums: dict[str, InferenceEngineChecksums] = {}
         self._router_cursor = 0
         self._http = GeneralHttpClientProvider.client
+        self._restarts: dict[str, tuple[int, float]] = {}  # cell id -> (attempts, earliest next attempt)
 
     @lock_exempt
     @init_once
@@ -330,6 +333,8 @@ class InferenceController:
             await cell.mark_failed()
         elif verdict == admission.VERIFIED and entering and cell.is_pending_weights:
             await cell.mark_weights_ready()
+            # a replacement at a url the router still holds as failed is registered already: readmit it
+            await admission.readmit_worker(self._http(), srv.router_url, cell.server_url)
         elif verdict == admission.VERIFIED and entering:
             await admission.readmit_worker(self._http(), srv.router_url, cell.server_url)
         elif verdict in (admission.STALE_VERSION, admission.CHECKSUM_MISMATCH) and cell.is_serving:
@@ -386,7 +391,10 @@ class InferenceController:
             if self.args.colocate:
                 await asyncio.gather(*[cell.init() for cell in cells if cell.is_uninitialized])
             pending = [cell for cell in cells if not (cell.is_pending_weights_or_serving or cell.is_failed)]
-            if not pending:
+            # a replacement that is still starting joins a later update instead of holding this one
+            ready = any(cell.is_pending_weights_or_serving for cell in cells)
+            restarting = self.args.rollout_restart_failed_engines and ready
+            if not pending or restarting:
                 return
             if time.monotonic() >= deadline:
                 raise TimeoutError(
@@ -478,6 +486,25 @@ class InferenceController:
                 logger.error(f"Ticking cell {cell.meta.cell_id} failed", exc_info=result)
         if self.args.use_miles_router:
             await self._readmit_recovered()
+        if self.args.rollout_restart_failed_engines:
+            await self._restart_failed()
+
+    @requires_lock
+    async def _restart_failed(self) -> None:
+        """Relaunch failed engines, backing off 5 * 2^n s (at most 300 s) between attempts on one cell. The watch
+        replaces the cell, and the new engine serves only after a weight update verifies it."""
+        now = time.monotonic()
+        for cell_id, cell in [item for srv in self.servers.values() for item in srv.server_cells.items()]:
+            if cell.is_serving:
+                self._restarts.pop(cell_id, None)
+            attempts, due = self._restarts.get(cell_id, (0, now))
+            if not cell.is_failed or now < due:
+                continue
+            delay = min(RESTART_BACKOFF_SECONDS * 2 ** (attempts + 1), RESTART_BACKOFF_MAX_SECONDS)
+            self._restarts[cell_id] = (attempts + 1, now + delay)
+            logger.warning(f"Restarting failed engine cell {cell_id} (attempt {attempts + 1})")
+            await self._engine_provider.stop_cells(cell_ids=[cell_id])
+            await self._engine_provider.start_cells(cell_ids=[cell_id])
 
     # -------------------------- reconcile -----------------------------
 
