@@ -776,23 +776,33 @@ class MegatronTrainRayActor(TrainRayActor):
             # Train
             num_rollouts = get_num_rollouts(self.args, rollout_data, num_optimizer_steps)
             self._set_replay_stage("replay_backward")
-            with timer("actor_train"):
-                train_step_outcome = train(
-                    rollout_id,
-                    self.model,
-                    self.optimizer,
-                    self.opt_param_scheduler,
-                    data_iterator,
-                    num_microbatches,
-                    num_rollouts,
-                    witness_info=witness_info,
-                    attempt=attempt,
-                    ft_test_action_executor=self._ft_test_action_executor,
-                )
+            routing_replay_manager.measure_overlap = (
+                self.args.dump_details is not None and self._use_rollout_replay(routing_replay_manager)
+            )
+            try:
+                with timer("actor_train"):
+                    train_step_outcome = train(
+                        rollout_id,
+                        self.model,
+                        self.optimizer,
+                        self.opt_param_scheduler,
+                        data_iterator,
+                        num_microbatches,
+                        num_rollouts,
+                        witness_info=witness_info,
+                        attempt=attempt,
+                        ft_test_action_executor=self._ft_test_action_executor,
+                    )
+            finally:
+                routing_replay_manager.measure_overlap = False
 
             self.prof.step(rollout_id=rollout_id)
 
         train_dump_utils.save_debug_train_data(self.args, rollout_id=rollout_id, rollout_data=rollout_data)
+        train_dump_utils.save_routing_overlap(
+            self.args, rollout_id=rollout_id, rollout_data=rollout_data, log=routing_replay_manager.overlap_log
+        )
+        routing_replay_manager.overlap_log = []
 
         for m in all_replay_managers:
             if m.enabled:

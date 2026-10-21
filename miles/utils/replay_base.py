@@ -64,6 +64,24 @@ class BaseReplayManager:
         self.enabled = False
         self.stage = "fallthrough"
         self.register_replay_list_func = None
+        # Route-overlap telemetry: read-only, set by the actor around the training forward only.
+        self.measure_overlap = False
+        self.current_module = None
+        self.overlap_log: list[tuple[int, torch.Tensor, torch.Tensor]] = []  # (layer_number, overlap u8, mass f16)
+
+    @torch.no_grad()
+    def measure(self, old_topk_fn, scores, topk, replayed, padding, *args, **kwargs):
+        """Per token: how many replayed experts the trainer's own router would also pick, and the gate mass
+        the replayed set gets relative to the trainer's own top-k. Reads `scores`; never writes a tensor
+        the forward uses."""
+        natural = old_topk_fn(scores, topk, *args, **kwargs)
+        natural = natural[1] if isinstance(natural, tuple) else natural
+        overlap = (replayed.unsqueeze(-1) == natural.unsqueeze(-2)).any(-1).sum(-1).to(torch.uint8)
+        overlap.masked_fill_(padding, 255)  # no token here
+        bias = getattr(self.current_module, "expert_bias", None)
+        gate = scores if bias is None else scores - bias.float()  # sigmoid(z): what the forward weights by
+        mass = gate.gather(1, replayed.long()).sum(-1) / gate.gather(1, natural.long()).sum(-1).clamp_min(1e-20)
+        self.overlap_log.append((int(self.current_module.layer_number), overlap, mass.to(torch.float16)))
 
     def create_replay(self, stream_idx: int | None = None) -> Replay:
         replay = Replay(stream_idx=stream_idx)
@@ -107,6 +125,11 @@ class BaseReplayManager:
                     % scores.shape[1]
                 )
                 top_indices = torch.where(all_invalid.unsqueeze(-1), ar, top_indices)
+
+            # "replay_forward" is the training forward (model.py forward_step); the recompute runs as
+            # "replay_backward" and is skipped, so each (token, layer) is measured once.
+            if manager.measure_overlap and manager.stage == "replay_forward":
+                manager.measure(old_topk_fn, scores, topk, top_indices, all_invalid, *args, **kwargs)
 
             if return_probs:
                 return scores.gather(1, top_indices), top_indices
@@ -152,6 +175,7 @@ class BaseReplayManager:
 
         def pre_forward_hook(*args, **kwargs):
             manager.set_current(replay)
+            manager.current_module = module
 
         module.register_forward_pre_hook(pre_forward_hook)
 
