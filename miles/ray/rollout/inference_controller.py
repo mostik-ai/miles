@@ -18,6 +18,8 @@ from miles.ray.rollout.router_manager import resolve_router_addrs
 from miles.ray.rollout.server_cell import ServerCell, ServerCellMetadata
 from miles.utils import async_utils
 from miles.utils.audit_utils.checksum_utils import InferenceEngineChecksums
+from miles.utils.audit_utils.event_logger.logger import get_event_logger, is_event_logger_initialized
+from miles.utils.audit_utils.event_logger.models import InferenceEngineWeightChecksumEvent
 from miles.utils.audit_utils.process_identity import SimpleProcessIdentity
 from miles.utils.context_lock import (
     ContextLock,
@@ -387,6 +389,14 @@ class InferenceController:
         for cell in recovered:
             if cell.is_serving:
                 await self._settle(srv, cell, verdicts[cell.server_url], True, expected is not None)
+        # the maps that vouched for it, as an update's admission logs its own
+        maps = [result[1] for result in observed.values() if not isinstance(result, BaseException)]
+        if maps and is_event_logger_initialized():
+            # no rollout drove this readmission, so it carries the stamp the out-of-loop startup sync carries
+            get_event_logger().log(
+                InferenceEngineWeightChecksumEvent,
+                dict(rollout_id=self.args.start_rollout_id - 1, engine_checksums=maps),
+            )
 
     @requires_lock
     async def _router_states(self, srv: RolloutServer) -> dict[str, dict]:

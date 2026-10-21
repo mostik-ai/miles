@@ -7,6 +7,7 @@ LoRA adapter pushes.
 """
 
 import logging
+import time
 from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 
@@ -93,8 +94,12 @@ class WeightUpdater:
         return self.protocol.pop_metrics()
 
     @torch.no_grad()
-    def update_weights(self) -> None:
-        """Run one weight sync: session frame + base-bucket stream + adapter pushes for LoRA."""
+    def update_weights(self, fault_delay: float = 0.0) -> None:
+        """Run one weight sync: session frame + base-bucket stream + adapter pushes for LoRA.
+
+        ``fault_delay`` (a fault drill's delayed refresh) holds the paused engines that many seconds on the driver,
+        after pausing them and before the update begins.
+        """
         protocol = self.protocol
         if not protocol.begin_sync(self.weight_version + 1, self._iter_base_buckets):
             return
@@ -108,6 +113,9 @@ class WeightUpdater:
         with meter.phase("update_weights_begin"):
             if protocol.use_weight_update_session and driver:
                 pause_engines(self.args, protocol.rollout_engines)
+                if fault_delay:
+                    logger.warning("Fault drill: holding the paused engines %.0f s before the update", fault_delay)
+                    time.sleep(fault_delay)
                 self._register_new_lora_adapters(protocol.rollout_engines, adapters)
                 begin_weight_update(
                     protocol.rollout_engines, self._hf_weight_iterator.weight_update_selector, sync_base=sync_base

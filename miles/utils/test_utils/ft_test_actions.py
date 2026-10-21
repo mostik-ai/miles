@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import sys
+import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -11,6 +12,7 @@ from pydantic import TypeAdapter, model_validator
 
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 from miles.utils.retry_utils import retry_until_deadline
+from miles.utils.test_utils.fault_injector import FailureMode
 from miles.utils.workers.naming import parse_cell_id
 
 if TYPE_CHECKING:
@@ -35,19 +37,32 @@ def render_ft_test_actions(actions: Sequence[dict]) -> str:
 
 _CELL_RESUME_OBSERVED_TIMEOUT_SECONDS = 300.0
 
-_CONTROLLER_ACTIONS = {"stop_cell_at_end", "start_cell_at_end"}
+_CONTROLLER_ACTIONS = {"stop_cell_at_end", "start_cell_at_end", "delay_weight_update", "kill_engine"}
 _ACTOR_ACTIONS = {"crash_before_allreduce"}
 _ORCHESTRATION_ACTIONS = {SLEEP_FOREVER_AT_END_ACTION}
+# Rollout-pool actions: they target an inference engine cell, not the trainer pool the controller drives.
+_ENGINE_ACTIONS = {"kill_engine"}
 
 SleepFn = Callable[[float], Awaitable[None]]
 
 
 class FTTestAction(FrozenStrictBaseModel):
     at_rollout: int
-    action: Literal["stop_cell_at_end", "start_cell_at_end", "crash_before_allreduce", "sleep_forever_at_end"]
+    action: Literal[
+        "stop_cell_at_end",
+        "start_cell_at_end",
+        "crash_before_allreduce",
+        "sleep_forever_at_end",
+        "delay_weight_update",
+        "kill_engine",
+    ]
     cell_id: str | None = None
     rank: int = 0  # for actor-level actions: which rank within the cell
     attempt: int = 0  # for actor-level actions: which attempt (0 = first try)
+    # delay_weight_update: how long rank 0 holds the paused engines, after pausing them and before the update begins
+    seconds: float = 0.0
+    # the declared fault this injects: a receipt {"fault", "injected_at", ...} is written before it takes effect
+    fault: str | None = None
 
     @model_validator(mode="after")
     def _check_cell_name_matches_action(self) -> "FTTestAction":
@@ -59,6 +74,7 @@ class FTTestAction(FrozenStrictBaseModel):
 
 
 _ACTION_LIST_ADAPTER: TypeAdapter[list[FTTestAction]] = TypeAdapter(list[FTTestAction])
+
 
 
 def _load_actions(args: object, action_filter: set[str]) -> list[FTTestAction]:
@@ -99,32 +115,90 @@ def _assert_loop_parkable(args: object, *, trainer_model_id: str | None) -> None
 
 class FTTestActionControllerExecutor:
     def __init__(
-        self, *, actions: list[FTTestAction], controller: "TrainerController", cell_operations: "BaseCellOperations"
+        self,
+        *,
+        actions: list[FTTestAction],
+        controller: "TrainerController",
+        cell_operations: "BaseCellOperations",
+        receipt_dir: str | None = None,
     ) -> None:
         self._actions = actions
         self._controller = controller
         self._cell_operations = cell_operations
+        self._receipt_dir = receipt_dir
 
     @staticmethod
     def from_args(
         args: object, *, controller: "TrainerController", cell_operations: "BaseCellOperations"
     ) -> "FTTestActionControllerExecutor":
         return FTTestActionControllerExecutor(
-            actions=_load_actions(args, _CONTROLLER_ACTIONS), controller=controller, cell_operations=cell_operations
+            actions=_load_actions(args, _CONTROLLER_ACTIONS),
+            controller=controller,
+            cell_operations=cell_operations,
+            receipt_dir=getattr(args, "ci_ft_test_receipt_dir", None),
         )
 
     async def run_after_step(self, rollout_id: int) -> None:
-        for action in self._actions:
-            if action.at_rollout == rollout_id:
-                self._check_action_target(action)
-                logger.info("FT test action: %s cell %s after rollout %d", action.action, action.cell_id, rollout_id)
+        for action in self._due(rollout_id, {"stop_cell_at_end", "start_cell_at_end"}):
+            operations = self._cell_operations
+            if action.action == "stop_cell_at_end":
+                await operations.suspend(cell_id=action.cell_id)
+            elif action.action == "start_cell_at_end":
+                await operations.resume(cell_id=action.cell_id)
+                await self._wait_cell_observed(action.cell_id)
 
-                operations = self._cell_operations
-                if action.action == "stop_cell_at_end":
-                    await operations.suspend(cell_id=action.cell_id)
-                elif action.action == "start_cell_at_end":
-                    await operations.resume(cell_id=action.cell_id)
-                    await self._wait_cell_observed(action.cell_id)
+    def weight_update_delay(self, rollout_id: int | None) -> dict[str, float]:
+        """The update_weights arguments that make rank 0 hold the paused engines, for the update after this rollout."""
+        seconds = sum(action.seconds for action in self._due(rollout_id, {"delay_weight_update"}))
+        return {"fault_delay": seconds} if seconds else {}
+
+    async def run_after_update(self, rollout_id: int | None) -> None:
+        """Kill each engine due after this rollout's weight update, while it serves: the worker hosting the engine is
+        SIGKILLed where it stands, and the engine it serves from dies with it."""
+        for action in self._due(rollout_id, {"kill_engine"}):
+            assert (cell_id := action.cell_id) is not None
+            await self._cell_operations.inject_fault(cell_id=cell_id, mode=FailureMode.SIGKILL, sub_index=action.rank)
+
+    def _due(self, rollout_id: int | None, kinds: set[str]) -> list[FTTestAction]:
+        """The actions of these kinds due at this rollout, each checked, logged and receipted before it acts. A fault
+        whose receipt is already filed was injected by an earlier invocation of the run, so a resume that replays its
+        rollout skips it: the first injection's window stands."""
+        filed = self._filed()
+        due = [action for action in self._actions if action.at_rollout == rollout_id and action.action in kinds]
+        for action in (action for action in due if action.fault in filed):
+            logger.info("FT test action: %s for fault %s already injected; skipped", action.action, action.fault)
+        due = [action for action in due if action.fault not in filed]
+        for action in due:
+            self._check_action_target(action)
+            logger.info("FT test action: %s cell %s after rollout %d", action.action, action.cell_id, rollout_id)
+            self._write_receipt(action, rollout_id)
+        return due
+
+    def _write_receipt(self, action: FTTestAction, rollout_id: int) -> None:
+        """The declared fault's injection receipt, <dir>/<fault>-<rollout>.json, written whole before the fault acts."""
+        if self._receipt_dir is None or action.fault is None:
+            return
+        receipt = {
+            "fault": action.fault,
+            "injected_at": time.time(),
+            "action": action.action,
+            "rollout_id": rollout_id,
+            "cell_id": action.cell_id,
+            "seconds": action.seconds,
+        }
+        os.makedirs(self._receipt_dir, exist_ok=True)
+        path = os.path.join(self._receipt_dir, f"{action.fault}-{rollout_id}.json")
+        if os.path.exists(path):
+            return  # another action of this fault filed it: a receipt is never overwritten
+        with open(f"{path}.partial", "w") as stream:
+            json.dump(receipt, stream)
+        os.replace(f"{path}.partial", path)
+
+    def _filed(self) -> set[str]:
+        """The faults whose receipts, <fault>-<rollout>.json, are already in the receipt directory."""
+        if self._receipt_dir is None or not os.path.isdir(self._receipt_dir):
+            return set()
+        return {name.rsplit("-", 1)[0] for name in os.listdir(self._receipt_dir) if name.endswith(".json")}
 
     async def _wait_cell_observed(self, cell_id: str) -> None:
         async def _check(_remaining: float) -> None:
@@ -143,6 +217,8 @@ class FTTestActionControllerExecutor:
     def _check_action_target(self, action: FTTestAction) -> None:
         assert (cell_id := action.cell_id) is not None
         parsed = parse_cell_id(cell_id)
+        if action.action in _ENGINE_ACTIONS:
+            return  # an engine cell, which the controller does not drive; cell operations refuse an unknown one
         assert parsed.pool_id == self._controller.pool_id, (
             f"FT test action targets pool_id {parsed.pool_id!r} but this controller drives {self._controller.pool_id!r} "
             f"(action={action})"

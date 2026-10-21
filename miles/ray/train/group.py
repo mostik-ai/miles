@@ -393,12 +393,19 @@ class TrainerController:
         log_structured(logger.info, tag="ft", op="update_weights", phase="start", rollout=rollout_id)
         requested_at = time.time()  # rank 0 closes the admission phase from here to its own start
         # TODO: allow using all cells to update weights (instead of first alive cell)
+        # A fault drill's delayed refresh: rank 0 holds the paused engines this long (ft-test-actions)
+        delay = self._test_action_executor.weight_update_delay(rollout_id)
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
         weight_versions = await retry(
-            lambda _: self._execute_first_alive("update_weights", info=info, requested_at=requested_at),
+            lambda _: self._execute_first_alive("update_weights", info=info, requested_at=requested_at, **delay),
             max_attempts=_RETRY_MAX_ATTEMPTS,
         )
         return weight_versions[0]
+
+    async def run_fault_actions_after_update(self, rollout_id: int | None = None) -> None:
+        """A fault drill's engine loss strikes between refreshes, while the engines serve this version; it runs here,
+        once the update released the inference controller's lock, because killing a cell takes that lock."""
+        await self._test_action_executor.run_after_update(rollout_id)
 
     async def get_deployment_identity(self) -> DeploymentIdentity:
         return self._deployment_identity

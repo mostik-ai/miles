@@ -943,7 +943,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @with_logs
     @timer
-    def update_weights(self, info: UpdatableEngines, requested_at: float | None = None) -> int | None:
+    def update_weights(
+        self, info: UpdatableEngines, requested_at: float | None = None, fault_delay: float = 0.0
+    ) -> int | None:
         began = time.time()
         self._heartbeat.bump()
         if self.args.debug_train_only or self.args.debug_rollout_only:
@@ -989,7 +991,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
             print_memory("before update_weights")
-            self.weight_updater.update_weights()
+            self.weight_updater.update_weights(fault_delay=fault_delay)
             print_memory("after update_weights")
 
             if self.args.ci_test and len(rollout_engines) > 0 and not is_lora_enabled(self.args):

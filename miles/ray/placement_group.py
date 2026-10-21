@@ -328,6 +328,8 @@ async def update_weights(
         checksums=checksums,
     )
 
+    await actor_model.run_fault_actions_after_update(rollout_id=rollout_id)
+
     if weight_version is not None:
         await rollout_executor.set_weight_version(weight_version, trainer_model_id=trainer_model_id)
 

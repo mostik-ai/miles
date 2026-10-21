@@ -2463,7 +2463,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 '"cell_id": "trainer-engine-actor-00002", "rank": 0, "attempt": 0}. '
                 "cell_id is the full cell id (spec name plus zero-padded cell index) of the target cell. "
                 'The action "sleep_forever_at_end" names no cell: it puts the orchestration script itself to sleep '
-                "once the step it names is trained and saved, so the run never starts the step after it.",
+                "once the step it names is trained and saved, so the run never starts the step after it. Fault "
+                'drills also take {"action": "delay_weight_update", "seconds": S} (the trainer cell\'s rank 0 holds '
+                'the paused engines S seconds before the update after rollout N) and {"action": "kill_engine"} (an '
+                'inference engine cell is SIGKILLed after that update); "fault": "<id>" names the declared fault '
+                "whose receipt it writes.",
+            )
+            parser.add_argument(
+                "--ci-ft-test-receipt-dir",
+                type=str,
+                default=None,
+                help="Directory where FT test actions that name a declared fault write its injection receipt, "
+                "<fault>-<rollout>.json with the injection time, before the fault takes effect.",
             )
             # TODO ad hoc hack: revert after the args refactor
             parser.add_argument(
