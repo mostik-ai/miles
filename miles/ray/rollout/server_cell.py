@@ -188,15 +188,22 @@ class ServerCell:
         await self._report_env_if_due()
 
     async def _report_env_if_due(self) -> None:
-        if not self.is_pending_weights_or_serving:
-            return
+        if self.is_pending_weights_or_serving:
+            await self._record_env()
+
+    async def _record_env(self) -> bool:
+        """Whether this cell's resolved server args have reached the event log; it may not serve before."""
         await self._env_reporter.report_if_due(
             cell_id=self.meta.cell_id, server_url=self.server_url, api_client=self.api_client
         )
+        return self._env_reporter.recorded
 
     async def _tick_when_initializing(self) -> None:
         addr_info = self._state.addr_info
         if not await probe_server_healthy(server_url=addr_info.server_url, api_key=self.meta.sglang_api_key):
+            return
+
+        if not await self._record_env():
             return
 
         if self.meta.update_weights and loads_dummy_weights(self.args):

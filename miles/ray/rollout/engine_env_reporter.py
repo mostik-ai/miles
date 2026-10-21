@@ -16,6 +16,12 @@ class EngineEnvReporter:
     def __init__(self, *, interval_seconds: float) -> None:
         self._interval_seconds = interval_seconds
         self._next_due: float | None = None
+        self._recorded = False
+
+    @property
+    def recorded(self) -> bool:
+        """Whether the engine's resolved server args have been read, and logged wherever a log exists."""
+        return self._recorded
 
     async def report_if_due(self, *, cell_id: str, server_url: str, api_client: SGLangApiClient) -> None:
         now = time.monotonic()
@@ -33,13 +39,14 @@ class EngineEnvReporter:
     async def _report(self, *, cell_id: str, server_url: str, api_client: SGLangApiClient) -> bool:
         try:
             server_info = await asyncio.wait_for(api_client.get_server_info(), timeout=SERVER_INFO_TIMEOUT_SECONDS)
-            if is_event_logger_initialized():
-                get_event_logger().log(
-                    EngineEnvReportEvent,
-                    {"cell_id": cell_id, "server_url": server_url, "server_info": redact_server_info(server_info)},
-                    print_log=False,
-                )
-            return True
         except Exception:
-            logger.warning("Failed to record the engine env of cell %s", cell_id, exc_info=True)
+            logger.warning("Failed to read the engine env of cell %s", cell_id, exc_info=True)
             return False
+        if is_event_logger_initialized():
+            get_event_logger().log(
+                EngineEnvReportEvent,
+                {"cell_id": cell_id, "server_url": server_url, "server_info": redact_server_info(server_info)},
+                print_log=False,
+            )
+        self._recorded = True
+        return True
