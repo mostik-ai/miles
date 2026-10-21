@@ -103,9 +103,21 @@ class RolloutServer:
     def engine_gpu_offsets(self) -> list[int]:
         return [cell.meta.gpu_offset for cell in self._cells_by_gpu_offset()]
 
+    @property
+    @requires_lock
+    def weight_update_cells(self) -> list[ServerCell]:
+        """The cells a weight update reaches, parallel to ``api_clients``."""
+        return self._cells_by_gpu_offset()
+
+    @property
+    @lock_exempt
+    def router_url(self) -> str:
+        return f"http://{self.router_ip}:{self.router_port}"
+
     @requires_lock
     def _cells_by_gpu_offset(self) -> list[ServerCell]:
-        return sorted(self.server_cells.values(), key=lambda cell: cell.meta.gpu_offset)
+        # a failed engine is left out, so the trainer rebuilds its transfer group without it
+        return sorted((cell for cell in self.server_cells.values() if not cell.is_failed), key=lambda cell: cell.meta.gpu_offset)
 
     @requires_lock
     async def add_cell(self, cell_meta: ServerCellMetadata):

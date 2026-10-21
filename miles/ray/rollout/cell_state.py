@@ -24,8 +24,14 @@ class StateServing(FrozenStrictBaseModel):
     addr_info: CellAddrInfo
 
 
+class StateFailed(FrozenStrictBaseModel):
+    """The engine was found dead: unrouted and left out of weight updates."""
+
+    addr_info: CellAddrInfo
+
+
 class StateDisposed(FrozenStrictBaseModel):
     pass
 
 
-CellState = StateUninitialized | StateInitializing | StatePendingWeights | StateServing | StateDisposed
+CellState = StateUninitialized | StateInitializing | StatePendingWeights | StateServing | StateFailed | StateDisposed

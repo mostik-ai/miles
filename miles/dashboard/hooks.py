@@ -20,6 +20,7 @@ from miles.dashboard.logging_utils import RateLimitedWarner
 from miles.dashboard.store import (
     DataBufferSample,
     EngineInfo,
+    EngineStateChange,
     PhaseEvent,
     Role,
     TopologySnapshot,
@@ -360,6 +361,33 @@ def report_data_buffer(length: int | None) -> None:
         handle.push_data_buffer.remote(DataBufferSample(ts=time.time(), length=length))
     except Exception:
         _warner.warn("dashboard data-buffer report failed")
+
+
+def report_engine_states(transitions: list[dict]) -> None:
+    """Forward the Miles router's engine state changes (``GET /worker_states``), each with the router's own time."""
+    if not transitions:
+        return
+    from miles.dashboard import backend
+
+    handle = backend.current_collector()
+    if handle is None:
+        return
+    try:
+        handle.push_engine_states.remote(
+            [
+                EngineStateChange(
+                    ts=change["ts"],
+                    addr=change["url"],
+                    state=change["to"],
+                    previous=change["from"],
+                    reason=change["reason"],
+                    failed_requests=change["failed_requests"],
+                )
+                for change in transitions
+            ]
+        )
+    except Exception:
+        _warner.warn("dashboard engine-state report failed")
 
 
 def _alive_engine_cells(servers) -> list:

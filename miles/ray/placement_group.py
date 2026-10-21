@@ -26,7 +26,6 @@ from miles.ray.specs.train import (
     external_trainer_controller_addrs,
 )
 from miles.ray.wiring import get_backend_capability
-from miles.utils.audit_utils.checksum_utils import flatten_inference_engine_checksums
 from miles.utils.audit_utils.event_logger import checkpoint as event_logger_checkpoint
 from miles.utils.audit_utils.event_logger.logger import get_event_logger, is_event_logger_initialized
 from miles.utils.audit_utils.event_logger.models import InferenceEngineWeightChecksumEvent
@@ -305,42 +304,95 @@ async def update_weights(
     if rollout_id is not None:
         await orchestration_executor.run_after_step(rollout_id=rollout_id)
 
+    await _await_weight_audit(trainer_model_id)
     info: UpdatableEngines = await inference_controller.start_update_weights(model_id=trainer_model_id)
     try:
         weight_version = await actor_model.update_weights(info=info, rollout_id=rollout_id)
     except BaseException:
+        # An update that did not complete admits no engine; abort ends it without admitting any.
         await inference_controller.abort_update_weights()
         raise
-    await inference_controller.end_update_weights(snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes)
+    checksums = await inference_controller.end_update_weights(
+        snapshot_cell_id_to_hashes=info.snapshot_cell_id_to_hashes,
+        completed=True,
+        version=weight_version,
+        model_id=trainer_model_id,
+    )
 
-    await _maybe_log_inference_engine_weight_checksums(
-        args, inference_controller=inference_controller, rollout_id=rollout_id, trainer_model_id=trainer_model_id
+    _log_inference_engine_weight_checksums(
+        args,
+        inference_controller=inference_controller,
+        rollout_id=rollout_id,
+        trainer_model_id=trainer_model_id,
+        version=weight_version,
+        checksums=checksums,
     )
 
     if weight_version is not None:
         await rollout_executor.set_weight_version(weight_version, trainer_model_id=trainer_model_id)
 
 
-async def _maybe_log_inference_engine_weight_checksums(
-    args, *, inference_controller: BaseWorkerHandle, rollout_id: int | None, trainer_model_id: str | None
-) -> None:
-    if not is_event_logger_initialized():
-        return
-    if args.debug_train_only or args.debug_rollout_only:
-        return
+# The checksum audit of the last weight version, per trainer model: it runs off the loop until the next
+# update of that model awaits it.
+_weight_audits: dict[str | None, asyncio.Future] = {}
 
-    check_weights_result = await inference_controller.check_weights(action="checksum", model_id=trainer_model_id)
-    if not check_weights_result:
+
+async def _await_weight_audit(trainer_model_id: str | None) -> None:
+    if (audit := _weight_audits.pop(trainer_model_id, None)) is not None:
+        await audit
+
+
+def _log_inference_engine_weight_checksums(
+    args,
+    *,
+    inference_controller: BaseWorkerHandle,
+    rollout_id: int | None,
+    trainer_model_id: str | None,
+    version: int | None,
+    checksums: list | None,
+) -> None:
+    """Log the maps an admission check already read; otherwise read them off the loop.
+
+    A rollout-only run logs them too, so an evaluation can prove which weights it served.
+    """
+    if not is_event_logger_initialized() or args.debug_train_only:
         return
-    engine_checksums = flatten_inference_engine_checksums(check_weights_result)
-    get_event_logger().log(
-        InferenceEngineWeightChecksumEvent,
-        dict(
-            rollout_id=args.start_rollout_id - 1 if rollout_id is None else rollout_id,
+    if checksums is not None:
+        _log_checksum_event(args, rollout_id, trainer_model_id, checksums)
+        return
+    _weight_audits[trainer_model_id] = asyncio.ensure_future(
+        _audit_weights(
+            args,
+            inference_controller=inference_controller,
+            rollout_id=rollout_id,
             trainer_model_id=trainer_model_id,
-            engine_checksums=engine_checksums,
-        ),
+            version=version,
+        )
     )
+
+
+async def _audit_weights(
+    args,
+    *,
+    inference_controller: BaseWorkerHandle,
+    rollout_id: int | None,
+    trainer_model_id: str | None,
+    version: int | None,
+) -> None:
+    audited = await inference_controller.audit_weights(version, model_id=trainer_model_id)
+    _log_checksum_event(args, rollout_id, trainer_model_id, audited)
+
+
+def _log_checksum_event(args, rollout_id: int | None, trainer_model_id: str | None, engine_checksums: list) -> None:
+    if engine_checksums:
+        get_event_logger().log(
+            InferenceEngineWeightChecksumEvent,
+            dict(
+                rollout_id=args.start_rollout_id - 1 if rollout_id is None else rollout_id,
+                trainer_model_id=trainer_model_id,
+                engine_checksums=engine_checksums,
+            ),
+        )
 
 
 # TODO: move (when reorganizing files)

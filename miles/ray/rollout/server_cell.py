@@ -15,6 +15,7 @@ from miles.ray.rollout.cell_state import (
     CellAddrInfo,
     CellState,
     StateDisposed,
+    StateFailed,
     StateInitializing,
     StatePendingWeights,
     StateServing,
@@ -105,6 +106,17 @@ class ServerCell:
                     workers_hash=self.meta.workers_hash,
                 )
 
+            case StateFailed():
+                return CellStatus(
+                    phase="Running",
+                    conditions=[
+                        CellCondition.allocated(TriState.TRUE),
+                        CellCondition.healthy(TriState.FALSE, reason="EngineFailed"),
+                        CellCondition.serving(TriState.FALSE),
+                    ],
+                    workers_hash=self.meta.workers_hash,
+                )
+
             case StateDisposed():
                 return CellStatus(
                     phase="Suspended",
@@ -136,12 +148,16 @@ class ServerCell:
         return isinstance(self._state, StateServing)
 
     @property
+    def is_failed(self) -> bool:
+        return isinstance(self._state, StateFailed)
+
+    @property
     def is_initializing_past_deadline(self) -> bool:
         return self.is_initializing and time.monotonic() - self._state.start_time >= INITIALIZING_TIMEOUT_SECONDS
 
     @property
     def addr_info(self) -> CellAddrInfo:
-        assert isinstance(self._state, (StateInitializing, StatePendingWeights, StateServing))
+        assert isinstance(self._state, (StateInitializing, StatePendingWeights, StateServing, StateFailed))
         return self._state.addr_info
 
     @property
@@ -208,6 +224,17 @@ class ServerCell:
         await self._register_with_router(addr_info=self._state.addr_info)
         self._mark_serving()
 
+    async def demote(self) -> None:
+        """A serving engine whose weights failed verification: unrouted until the next weight update proves them."""
+        await self._unregister_from_router()
+        self._change_state("demote", StateServing, StatePendingWeights(addr_info=self.addr_info))
+
+    async def mark_failed(self) -> None:
+        """A dead engine: unrouted, and left out of weight updates so the transfer group is rebuilt without it."""
+        if isinstance(self._state, StateServing):
+            await self._unregister_from_router()
+        self._change_state("mark_failed", (StatePendingWeights, StateServing), StateFailed(addr_info=self.addr_info))
+
     async def _register_with_router(self, addr_info: CellAddrInfo) -> None:
         await self.router_api_client.add_worker(
             worker_url=addr_info.server_url,
@@ -222,14 +249,14 @@ class ServerCell:
         match self._state:
             case StateServing():
                 await self._unregister_from_router()
-            case StateUninitialized() | StateInitializing() | StatePendingWeights() | StateDisposed():
+            case StateUninitialized() | StateInitializing() | StatePendingWeights() | StateFailed() | StateDisposed():
                 pass
             case _:
                 raise ValueError(f"{self._state=}")
 
         self._change_state(
             "dispose",
-            (StateUninitialized, StateInitializing, StatePendingWeights, StateServing, StateDisposed),
+            (StateUninitialized, StateInitializing, StatePendingWeights, StateServing, StateFailed, StateDisposed),
             StateDisposed(),
         )
 

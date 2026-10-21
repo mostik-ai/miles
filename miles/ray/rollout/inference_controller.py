@@ -9,11 +9,13 @@ from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_
 
 from miles.backends.sglang_utils.sglang_api_client import SGLangApiClient
 from miles.dashboard import hooks as dashboard_hooks
+from miles.ray.rollout import engine_admission as admission
 from miles.ray.rollout.eval_fleet import EvalFleetInfo, EvalFleetPin, InferenceControllerEvalFleet
 from miles.ray.rollout.rollout_server import RolloutServer, create_rollout_servers
 from miles.ray.rollout.router_manager import resolve_router_addrs
 from miles.ray.rollout.server_cell import ServerCell, ServerCellMetadata
 from miles.utils import async_utils
+from miles.utils.audit_utils.checksum_utils import InferenceEngineChecksums
 from miles.utils.audit_utils.process_identity import SimpleProcessIdentity
 from miles.utils.context_lock import (
     ContextLock,
@@ -25,6 +27,7 @@ from miles.utils.context_lock import (
     with_lock,
 )
 from miles.utils.ft_utils.api_server.models import CellStatus
+from miles.utils.http_utils import GeneralHttpClientProvider
 from miles.utils.init_once import InitOnce, init_once
 from miles.utils.logging_utils import configure_logger
 from miles.utils.misc import SimpleTicker
@@ -61,6 +64,13 @@ class InferenceController:
         self._eval_fleet: InferenceControllerEvalFleet | None = None
         self._watcher_disposers: list[StopWatchFn] = []
         self._ticker: SimpleTicker | None = None
+        # The weight version the serving engines were last updated to, and per version an explicit reference map
+        # that replaces agreement between engines: the parent checkpoint's map at a first sync, or an evaluation
+        # snapshot's receipt. Engine lifecycle needs the Miles router, whose engine states it drives.
+        self.serving_version: str | None = None
+        self.expected_checksums: dict[str, InferenceEngineChecksums] = {}
+        self._router_cursor = 0
+        self._http = GeneralHttpClientProvider.client
 
     @lock_exempt
     @init_once
@@ -230,12 +240,16 @@ class InferenceController:
                 engine_gpu_offsets=[],
                 snapshot_cell_id_to_hashes={},
             )
+        if self.args.use_miles_router:
+            await self._fail_dead_cells(srv)
+            urls = [cell.server_url for cell in srv.weight_update_cells]
+            await admission.pause_workers(self._http(), srv.router_url, urls)
 
         return UpdatableEngines(
             rollout_engines=srv.api_clients,
             engine_gpu_counts=srv.engine_gpu_counts,
             engine_gpu_offsets=srv.engine_gpu_offsets,
-            snapshot_cell_id_to_hashes={cell_id: cell.meta.workers_hash for cell_id, cell in srv.server_cells.items()},
+            snapshot_cell_id_to_hashes={cell.meta.cell_id: cell.meta.workers_hash for cell in srv.weight_update_cells},
         )
 
     @releases_lock
@@ -243,17 +257,126 @@ class InferenceController:
         pass
 
     @releases_lock
-    async def end_update_weights(self, snapshot_cell_id_to_hashes: dict[str, str]) -> None:
-        await asyncio.gather(
-            *[
-                cell.mark_weights_ready()
-                for srv in self.servers.values()
-                for cell_id, cell in srv.server_cells.items()
-                if cell_id in snapshot_cell_id_to_hashes
-                and snapshot_cell_id_to_hashes[cell_id] == cell.meta.workers_hash
-                and cell.is_pending_weights
-            ]
-        )
+    async def end_update_weights(
+        self,
+        snapshot_cell_id_to_hashes: dict[str, str],
+        *,
+        completed: bool = True,
+        version: int | None = None,
+        model_id: str | None = None,
+    ) -> list[InferenceEngineChecksums] | None:
+        """Admit the updated engines whose weights verify, and return their checksum maps when that took a check.
+
+        An update that did not complete admits nothing. Engines entering service (pending weights, or failed by the
+        router) are verified before they take requests; engines already serving are left to ``audit_weights``, off
+        the training loop. Without a version (a skipped update) pending engines are admitted unverified, as before.
+        """
+        srv = self._get_updatable_server(model_id=model_id)
+        if srv is None:
+            return None
+        cells = [
+            cell
+            for cell in srv.weight_update_cells
+            if snapshot_cell_id_to_hashes.get(cell.meta.cell_id) == cell.meta.workers_hash
+        ]
+        if self.args.use_miles_router:
+            await admission.resume_workers(self._http(), srv.router_url, [cell.server_url for cell in cells])
+        if not completed:
+            return None
+        if version is None or not self.args.use_miles_router:
+            await asyncio.gather(*[cell.mark_weights_ready() for cell in cells if cell.is_pending_weights])
+            return None
+        self.serving_version = str(version)
+        states = await self._router_states(srv)
+        entering = [c.server_url for c in cells if c.is_pending_weights or _router_failed(states, c.server_url)]
+        return await self._verify(srv, cells, entering) if entering else None
+
+    @with_lock
+    async def audit_weights(self, version: int | None, model_id: str | None = None) -> list[InferenceEngineChecksums]:
+        """The checksum maps of the addressable engines, read after an update that admitted no engine.
+
+        A dead engine is failed, and one at a stale version, or off an explicit reference, is demoted. Agreement
+        alone demotes nobody: two engines that disagree cannot tell which of them is wrong.
+        """
+        srv = self._get_updatable_server(model_id=model_id)
+        if srv is None:
+            return []
+        cells = [cell for cell in srv.weight_update_cells if cell.is_pending_weights_or_serving]
+        if self.args.use_miles_router and version is not None and str(version) == self.serving_version:
+            return await self._verify(srv, cells, entering=[])
+        observed = await admission.observe(self._http(), [cell.server_url for cell in cells])
+        return [result[1] for result in observed.values() if not isinstance(result, BaseException)]
+
+    @requires_lock
+    async def _verify(self, srv: RolloutServer, cells: list[ServerCell], entering: list[str]) -> list:
+        urls = [cell.server_url for cell in cells]
+        observed = await admission.observe(self._http(), urls)
+        expected = self.expected_checksums.get(self.serving_version)
+        trusted = [url for url in urls if url not in entering]
+        verdicts = admission.judge(observed, self.serving_version, trusted, expected)
+        if admission.CHECKSUM_MISMATCH in verdicts.values():
+            logger.error(f"Engine weights disagree at version {self.serving_version}: {verdicts}")
+        for cell in cells:
+            await self._settle(srv, cell, verdicts[cell.server_url], cell.server_url in entering, expected is not None)
+        return [result[1] for result in observed.values() if not isinstance(result, BaseException)]
+
+    @requires_lock
+    async def _settle(
+        self, srv: RolloutServer, cell: ServerCell, verdict: str, entering: bool, explicit: bool
+    ) -> None:
+        """Apply one verdict. A serving engine is demoted for a stale version, and for a mismatch when it enters
+        service or against an explicit reference; an unanswered check changes nothing."""
+        if verdict == admission.UNREACHABLE:
+            await cell.mark_failed()
+        elif verdict == admission.VERIFIED and entering and cell.is_pending_weights:
+            await cell.mark_weights_ready()
+        elif verdict == admission.VERIFIED and entering:
+            await admission.readmit_worker(self._http(), srv.router_url, cell.server_url)
+        elif verdict in (admission.STALE_VERSION, admission.CHECKSUM_MISMATCH) and cell.is_serving:
+            if entering or explicit or verdict == admission.STALE_VERSION:
+                await cell.demote()
+
+    @requires_lock
+    async def _fail_dead_cells(self, srv: RolloutServer) -> None:
+        """A refused connection proves an engine dead; so does any failed probe of one the router already failed."""
+        cells = srv.weight_update_cells
+        states = await self._router_states(srv)
+        outcomes = await asyncio.gather(*(admission.probe(self._http(), cell.server_url) for cell in cells))
+        for cell, outcome in zip(cells, outcomes, strict=True):
+            if outcome == "refused" or (outcome != "ok" and _router_failed(states, cell.server_url)):
+                logger.warning(f"Engine {cell.server_url} is dead ({outcome}); leaving it out of weight updates")
+                await cell.mark_failed()
+
+    @requires_lock
+    async def _readmit_recovered(self) -> None:
+        """Between updates, verify the serving engines the router failed that answer again, with the lock released,
+        and readmit those still at the current version once it is taken again."""
+        srv, version = self._get_updatable_server(), self.serving_version
+        if srv is None or version is None:
+            return
+        states = await self._router_states(srv)
+        cells = [cell for cell in srv.weight_update_cells if cell.is_serving]
+        recovered = [cell for cell in cells if states.get(cell.server_url, {}).get("state") == "recovered"]
+        if not recovered:
+            return
+        trusted = [c.server_url for c in cells if states.get(c.server_url, {}).get("state") in ("serving", "paused")]
+        async with self.context_lock.with_released():
+            observed = await admission.observe(self._http(), [cell.server_url for cell in recovered] + trusted)
+        if self.serving_version != version:
+            return  # an update ran meanwhile, and its end verified these engines
+        expected = self.expected_checksums.get(version)
+        verdicts = admission.judge(observed, version, trusted, expected)
+        for cell in recovered:
+            if cell.is_serving:
+                await self._settle(srv, cell, verdicts[cell.server_url], True, expected is not None)
+
+    @requires_lock
+    async def _router_states(self, srv: RolloutServer) -> dict[str, dict]:
+        """The router's engine states; the changes since the last read go to the dashboard with their own times."""
+        report = await admission.worker_states(self._http(), srv.router_url, since=self._router_cursor)
+        self._router_cursor = report["next"]
+        dashboard_hooks.report_engine_states(report["transitions"])
+        return report["workers"]
 
     @requires_lock
     async def _ensure_cells_ready(self, model_id: str | None = None) -> None:
@@ -262,7 +385,7 @@ class InferenceController:
             cells = [cell for srv in self._get_servers_of_model_id(model_id) for cell in srv.server_cells.values()]
             if self.args.colocate:
                 await asyncio.gather(*[cell.init() for cell in cells if cell.is_uninitialized])
-            pending = [cell for cell in cells if not cell.is_pending_weights_or_serving]
+            pending = [cell for cell in cells if not (cell.is_pending_weights_or_serving or cell.is_failed)]
             if not pending:
                 return
             if time.monotonic() >= deadline:
@@ -353,6 +476,8 @@ class InferenceController:
         for cell, result in zip(cells, results, strict=True):
             if isinstance(result, BaseException):
                 logger.error(f"Ticking cell {cell.meta.cell_id} failed", exc_info=result)
+        if self.args.use_miles_router:
+            await self._readmit_recovered()
 
     # -------------------------- reconcile -----------------------------
 
@@ -391,6 +516,10 @@ class InferenceController:
     async def _health_monitoring_resume(self, model_id: str | None) -> None:
         for srv in self._get_servers_of_model_id(model_id):
             srv.health_checker_activeness.bump_active(True)
+
+
+def _router_failed(states: dict[str, dict], url: str) -> bool:
+    return states.get(url, {}).get("state") in ("failed", "recovered")
 
 
 @dataclass(frozen=True)

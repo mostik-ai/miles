@@ -54,6 +54,7 @@ class Stream(StrEnum):
     TRAJECTORIES = "trajectories"
     GPU_PROCESSES = "gpu_processes"
     DATA_BUFFER = "data_buffer"
+    ENGINE_STATES = "engine_states"
 
     @property
     def filename(self) -> str:
@@ -161,6 +162,22 @@ class DataBufferSample(Record):
     length: int
 
 
+@dataclass
+class EngineStateChange(Record):
+    """One change of an engine's routing state, as the Miles router recorded it: serving, paused (an in-place
+    weight update), suspect, failed, recovered (failed but answering probes, awaiting weight verification) or
+    absent (not registered). ``failed_requests`` counts the proxied requests the router answered with an error
+    for this engine so far. Low-rate and unpartitioned."""
+
+    stream: ClassVar[Stream] = Stream.ENGINE_STATES
+    ts: float
+    addr: str
+    state: str
+    previous: str
+    reason: str
+    failed_requests: int
+
+
 class TrajectoryEventKind(StrEnum):
     ATTEMPT_START = "attempt_start"
     GEN_START = "gen_start"
@@ -242,6 +259,7 @@ _RECORD_TYPE_OF_STREAM: dict[Stream, type[Record]] = {
         TrajectoryEvent,
         GpuProcessSample,
         DataBufferSample,
+        EngineStateChange,
     )
 }
 

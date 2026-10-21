@@ -33,6 +33,7 @@ from miles.dashboard.store import (
     DataBufferSample,
     EngineInfo,
     EngineSample,
+    EngineStateChange,
     GpuProcessSample,
     GpuSample,
     Meta,
@@ -217,6 +218,10 @@ class DashboardCollector:
 
     def push_data_buffer(self, sample: DataBufferSample) -> None:
         self._append(sample)
+
+    def push_engine_states(self, batch: list[EngineStateChange]) -> None:
+        for change in batch:
+            self._append(change)
 
     def update_topology(self, snapshot: TopologySnapshot) -> None:
         # an addr the actor path ever registered must not be resurrected as
