@@ -157,26 +157,28 @@ class RolloutExecutor:
             data, metadata, metrics = await self._get_rollout_data(
                 rollout_id=rollout_id, trainer_model_id=trainer_model_id
             )
-        self._dump_writer.save(
-            data, rollout_id=rollout_id, evaluation=False, metadata=metadata, trainer_model_id=trainer_model_id
-        )
-        log_rollout_data(
-            rollout_id, self.args, data, metrics, time.time() - start_time, trainer_model_id=trainer_model_id
-        )
-        data = convert_samples_to_train_data(
-            self.args,
-            data,
-            metadata=metadata,
-            custom_convert_samples_to_train_data_func=self.custom_convert_samples_to_train_data_func,
-            custom_reward_post_process_func=self.custom_reward_post_process_func,
-        )
-        sample_indices = data.get("sample_indices")
-        if self.args.delay_split_train_data_by_dp:
-            data_ref = object_store.get_instance().put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)
-        else:
-            data_ref = split_train_data_by_dp(
-                self.args, data, self._train_parallel_configs_of_model_id[trainer_model_id]
+        with timer("rollout_dump"):
+            self._dump_writer.save(
+                data, rollout_id=rollout_id, evaluation=False, metadata=metadata, trainer_model_id=trainer_model_id
             )
+        with timer("rollout_handoff"):
+            log_rollout_data(
+                rollout_id, self.args, data, metrics, time.time() - start_time, trainer_model_id=trainer_model_id
+            )
+            data = convert_samples_to_train_data(
+                self.args,
+                data,
+                metadata=metadata,
+                custom_convert_samples_to_train_data_func=self.custom_convert_samples_to_train_data_func,
+                custom_reward_post_process_func=self.custom_reward_post_process_func,
+            )
+            sample_indices = data.get("sample_indices")
+            if self.args.delay_split_train_data_by_dp:
+                data_ref = object_store.get_instance().put(value=data, value_spec=ROLLOUT_DATA_VALUE_SPEC)
+            else:
+                data_ref = split_train_data_by_dp(
+                    self.args, data, self._train_parallel_configs_of_model_id[trainer_model_id]
+                )
         return RolloutDataPack(sample_indices=sample_indices, data_ref=data_ref)
 
     async def eval(
@@ -206,9 +208,10 @@ class RolloutExecutor:
                     self.data_source,
                     evaluation=True,
                 )
-        data = result.data
-        self._dump_writer.save(data, rollout_id=rollout_id, evaluation=True)
-        metrics = log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
+        with timer("eval_record"):
+            data = result.data
+            self._dump_writer.save(data, rollout_id=rollout_id, evaluation=True)
+            metrics = log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
 

@@ -144,6 +144,8 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
         self._metric_stale_groups = 0
+        self._metric_stale_tokens = 0
+        self._metric_stale_truncated_groups = 0
         self._metric_consumed_staleness: list[int] = []
         self._metric_selected_newest_lag: list[int] = []
         self._metric_selected_version_span: list[int] = []
@@ -197,6 +199,11 @@ class DefaultDataBuffer(DataBuffer):
                     if self._args.max_weight_staleness is not None and staleness > self._args.max_weight_staleness:
                         logger.info(f"Filtered stale group ({staleness=} > max={self._args.max_weight_staleness})")
                         self._metric_stale_groups += 1
+                        samples = list(iter_samples(entry.group))
+                        self._metric_stale_tokens += sum(sample.response_length for sample in samples)
+                        self._metric_stale_truncated_groups += any(
+                            sample.status == Sample.Status.TRUNCATED for sample in samples
+                        )
                         self._unused_handler_fn(entry.prompt_group)
                         continue
                     self._metric_consumed_staleness.append(staleness)
@@ -229,6 +236,8 @@ class DefaultDataBuffer(DataBuffer):
             f"{prefix}queue_size": len(self._buffer),
             f"{prefix}aborted_groups_filtered": self._metric_aborted_groups,
             f"{prefix}stale_groups_filtered": self._metric_stale_groups,
+            f"{prefix}stale_tokens_filtered": self._metric_stale_tokens,
+            f"{prefix}stale_truncated_groups_filtered": self._metric_stale_truncated_groups,
             **self._metric_gatherer.collect(),
         }
         if consumed := self._metric_consumed_staleness:
@@ -264,6 +273,7 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_samples = 0
         self._metric_selected_versioned_samples = 0
         self._metric_aborted_groups = self._metric_stale_groups = 0
+        self._metric_stale_tokens = self._metric_stale_truncated_groups = 0
         return metrics
 
 

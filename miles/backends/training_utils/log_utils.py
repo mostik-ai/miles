@@ -410,8 +410,41 @@ def log_multi_turn_data(rollout_id: int, args: Namespace, rollout_data: RolloutB
         )
 
 
+def device_memory_metrics() -> dict[str, float]:
+    """Worst case over every rank since the previous update: allocator retries, peaks and physical headroom.
+
+    Headroom assumes memory outside the caching allocator stayed constant during the update.
+    """
+    stats = torch.cuda.memory_stats()
+    free, total = torch.cuda.mem_get_info()
+    reserved_peak, reserved_now = stats.get("reserved_bytes.all.peak", 0), stats.get("reserved_bytes.all.current", 0)
+    worst = torch.tensor(
+        [
+            stats.get("num_alloc_retries", 0),
+            stats.get("num_ooms", 0),
+            stats.get("active_bytes.all.peak", 0),
+            reserved_peak,
+            -(free - (reserved_peak - reserved_now)),
+        ],
+        dtype=torch.float64,
+        device=torch.cuda.current_device(),
+    )
+    dist.all_reduce(worst, op=dist.ReduceOp.MAX)
+    torch.cuda.reset_peak_memory_stats()
+    gib = 2**30
+    return {
+        "perf/memory_alloc_retries": worst[0].item(),
+        "perf/memory_ooms": worst[1].item(),
+        "perf/memory_active_peak_gib": worst[2].item() / gib,
+        "perf/memory_reserved_peak_gib": worst[3].item() / gib,
+        "perf/memory_min_headroom_gib": -worst[4].item() / gib,
+        "perf/memory_total_gib": total / gib,
+    }
+
+
 def log_perf_data(rollout_id: int, args: Namespace, extra_metrics: dict | None = None) -> None:
     parallel_state = get_parallel_state()
+    extra_metrics = {**(extra_metrics or {}), **device_memory_metrics()}
     train_metric_utils.log_perf_data_raw(
         rollout_id=rollout_id,
         args=args,
