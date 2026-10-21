@@ -3,6 +3,7 @@ import logging
 import os
 import random
 import shutil
+import time
 from contextlib import ExitStack, nullcontext
 
 import torch
@@ -17,6 +18,7 @@ from miles.backends.megatron_utils.rematerialize_utils import build_main_cast_co
 from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_hf_weight_iterator
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
+from miles.backends.training_utils.weight_update.telemetry import driver_phase, emit_phase
 from miles.backends.training_utils.weight_update.updater import WeightUpdater
 from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.rollout.inference_controller import UpdatableEngines
@@ -918,7 +920,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @with_logs
     @timer
-    def update_weights(self, info: UpdatableEngines) -> int | None:
+    def update_weights(self, info: UpdatableEngines, requested_at: float | None = None) -> int | None:
+        began = time.time()
         self._heartbeat.bump()
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return None
@@ -933,12 +936,17 @@ class MegatronTrainRayActor(TrainRayActor):
         process_groups_are_temporary = self.args.offload_train and self._asleep
         if process_groups_are_temporary:
             reload_process_groups()
+        # From the driver's request until this rank began: its lock and engine-readiness wait, as a phase.
+        if requested_at is not None and dist.get_rank() == 0:
+            emit_phase("update_weights_admission", requested_at, began)
 
         needs_reconnect = self.weight_updater.conn_status.needs_reconnect(snapshot_cell_id_to_hashes)
         if needs_reconnect:
             # Connection setup also allocates CUDA tensors (e.g. NCCL object
             # collectives). Do not reuse unmapped, offloaded allocator blocks.
-            with torch_memory_saver.disable() if self.args.offload_train else nullcontext():
+            with torch_memory_saver.disable() if self.args.offload_train else nullcontext(), driver_phase(
+                "update_weights_connect"
+            ):
                 self.weight_updater.connect_rollout_engines(
                     rollout_engines,
                     engine_gpu_counts=engine_gpu_counts,
@@ -986,6 +994,36 @@ class MegatronTrainRayActor(TrainRayActor):
             destroy_process_groups()
 
         return self.weight_updater.weight_version
+
+    @with_logs
+    def configure_weight_update(self, overrides: dict) -> None:
+        """Set weight-update arguments the next syncs read (a refresh-bench arm), and reconnect on the next one.
+
+        Only existing ``update_weight_*`` arguments; the transfer mode is fixed when the protocol is built.
+        """
+        names = set(overrides)
+        allowed = {name for name in vars(self.args) if name.startswith("update_weight_")} - {
+            "update_weight_transfer_mode"
+        }
+        if not names <= allowed:
+            raise ValueError(f"Not a weight-update argument an arm may set: {sorted(names - allowed)}")
+        for name, value in overrides.items():
+            setattr(self.args, name, value)
+        if self.weight_updater is not None:
+            self.weight_updater.conn_status.mark_trainer_stale()
+
+    @with_logs
+    def negate_weights(self) -> None:
+        """Negate every floating-point parameter in place (a refresh bench, between refreshes).
+
+        Exact and its own inverse: the next sync sends other values of every tensor, and two negations restore the
+        weights bit for bit, so the same sign always sends the same bytes.
+        """
+        with torch.no_grad():
+            for chunk in self.model:
+                for param in chunk.parameters():
+                    if param.is_floating_point():
+                        param.neg_()
 
     @with_logs
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:

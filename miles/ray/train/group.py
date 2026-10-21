@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -390,10 +391,11 @@ class TrainerController:
     async def update_weights(self, info: UpdatableEngines, rollout_id: int | None = None) -> int | None:
         """Broadcast weights to rollout engines and answer the version they now serve."""
         log_structured(logger.info, tag="ft", op="update_weights", phase="start", rollout=rollout_id)
+        requested_at = time.time()  # rank 0 closes the admission phase from here to its own start
         # TODO: allow using all cells to update weights (instead of first alive cell)
         # Catch with vanilla retry: cells w/ exceptions are auto marked errored, thus retry will find the next one
         weight_versions = await retry(
-            lambda _: self._execute_first_alive("update_weights", info=info),
+            lambda _: self._execute_first_alive("update_weights", info=info, requested_at=requested_at),
             max_attempts=_RETRY_MAX_ATTEMPTS,
         )
         return weight_versions[0]

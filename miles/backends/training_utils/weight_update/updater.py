@@ -26,6 +26,7 @@ from miles.backends.training_utils.weight_update.session import (
     resume_engines,
     set_weight_version,
 )
+from miles.backends.training_utils.weight_update.telemetry import RefreshMeter, log_refresh
 from miles.backends.training_utils.weight_update.utils import record_lora_checksums
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.lora.utils import LORA_ADAPTER_NAME
@@ -103,13 +104,15 @@ class WeightUpdater:
         adapters = self._get_updated_adapters()
 
         driver = dist.get_rank() == 0
-        if protocol.use_weight_update_session and driver:
-            pause_engines(self.args, protocol.rollout_engines)
-            self._register_new_lora_adapters(protocol.rollout_engines, adapters)
-            begin_weight_update(
-                protocol.rollout_engines, self._hf_weight_iterator.weight_update_selector, sync_base=sync_base
-            )
-        dist.barrier(group=get_gloo_group())
+        meter = RefreshMeter(measuring=driver)
+        with meter.phase("update_weights_begin"):
+            if protocol.use_weight_update_session and driver:
+                pause_engines(self.args, protocol.rollout_engines)
+                self._register_new_lora_adapters(protocol.rollout_engines, adapters)
+                begin_weight_update(
+                    protocol.rollout_engines, self._hf_weight_iterator.weight_update_selector, sync_base=sync_base
+                )
+            dist.barrier(group=get_gloo_group())
 
         checksums = {name: {} for name, _ in adapters} if self.is_lora and self.args.check_lora_weight_equal else None
         if checksums is not None:
@@ -118,19 +121,23 @@ class WeightUpdater:
             ), "the LoRA checksum manifest is recorded on one rank, which must hold the full adapter"
         with timer("update_weights_implementation"):
             pbar = tqdm(desc=f"[{protocol.group_name}] Update weights", total=0) if protocol.is_sender else None
-            for bucket in self._hf_weight_iterator.iter_hf_weights(
+            buckets = self._hf_weight_iterator.iter_hf_weights(
                 self.weights_getter(),
                 include_base=sync_base,
                 adapters=adapters,
                 materialize=protocol.is_sender,
-            ):
-                if protocol.is_sender:
-                    if driver and checksums is not None:
-                        record_lora_checksums(bucket, checksums)
-                    protocol.send_bucket(bucket)
-                    pbar.update(1)
-            protocol.after_base_weights()
-            dist.barrier(group=get_gloo_group())
+            )
+            with meter.counting_object_collectives():
+                for bucket in meter.exported(buckets):
+                    if protocol.is_sender:
+                        if driver and checksums is not None:
+                            record_lora_checksums(bucket, checksums)
+                        with meter.sending(bucket):
+                            protocol.send_bucket(bucket)
+                        pbar.update(1)
+            with meter.phase("update_weights_drain"):
+                protocol.after_base_weights()
+                dist.barrier(group=get_gloo_group())
 
         with timer("finalize_and_resume_engines"):
             protocol.finalize(self.weight_version)
@@ -140,6 +147,10 @@ class WeightUpdater:
                 resume_engines(protocol.rollout_engines)
             dist.barrier(group=get_gloo_group())
         protocol.after_engines_resumed()
+        totals = meter.share(get_gloo_group())
+        state = self.parallel_state
+        if state.tp.rank == 0 and state.is_pp_last_stage and state.effective_dp_cp.rank == 0:
+            log_refresh(self.args, totals, self.weight_version)
 
     def _iter_base_buckets(self, *, materialize: bool):
         return self._hf_weight_iterator.iter_hf_weights(self.weights_getter(), materialize=materialize)
