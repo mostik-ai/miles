@@ -280,6 +280,8 @@ class InferenceController:
         An update that did not complete admits nothing. Engines entering service (pending weights, or failed by the
         router) are verified before they take requests; engines already serving are left to ``audit_weights``, off
         the training loop. Without a version (a skipped update) pending engines are admitted unverified, as before.
+        The first completed update is judged against the initial map when one is given, and fails the job when it
+        leaves no engine serving: with admission closed nothing can generate the batch a next update needs.
         """
         srv = self._get_updatable_server(model_id=model_id)
         if srv is None:
@@ -340,8 +342,9 @@ class InferenceController:
     async def _settle(
         self, srv: RolloutServer, cell: ServerCell, verdict: str, entering: bool, explicit: bool
     ) -> None:
-        """Apply one verdict. A serving engine is demoted for a stale version, and for a mismatch when it enters
-        service or against an explicit reference; an unanswered check changes nothing."""
+        """Apply one verdict. A serving engine is demoted for a stale version, and for a mismatch or a tensor left
+        at its dummy value when it enters service or against an explicit reference; an unanswered check changes
+        nothing."""
         if verdict == admission.UNREACHABLE:
             await cell.mark_failed()
         elif verdict == admission.VERIFIED and entering and cell.is_pending_weights:
