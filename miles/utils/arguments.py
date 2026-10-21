@@ -2256,6 +2256,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Subsample a portion of the debug rollout data for faster debugging.",
             )
             parser.add_argument(
+                "--layer-slice",
+                type=int,
+                nargs=2,
+                default=None,
+                help=(
+                    "A stage harness: the model's registered bridge builds only the global layers [START, END) as "
+                    "one pipeline stage, and replayed routes are read from those layers' columns."
+                ),
+            )
+            parser.add_argument(
                 "--debug-rollout-only",
                 action="store_true",
                 default=False,

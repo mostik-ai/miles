@@ -37,6 +37,8 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
     parallelism, memory, and numerics settings that really come from args. Put
     new training flags here, not spread across the code.
     """
+    if (window := getattr(args, "layer_slice", None)) is not None:
+        assert provider.num_layers == window[1] - window[0], "the model's bridge must build the --layer-slice layers"
     # parallelism / sharding
     provider.tensor_model_parallel_size = args.tensor_model_parallel_size
     provider.pipeline_model_parallel_size = args.pipeline_model_parallel_size

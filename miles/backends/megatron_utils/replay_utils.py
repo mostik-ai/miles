@@ -1,9 +1,15 @@
 from megatron.core.transformer.transformer_block import get_num_layers_to_build
 from megatron.core.transformer.transformer_layer import get_transformer_layer_offset
+from megatron.training.global_vars import get_args
 
 
 def register_replay_list_moe(replay_list, replay_data, *, models, **_kwargs):
-    """Map replay streams to Megatron MoE layers using the local model layout."""
+    """Map replay streams to Megatron MoE layers using the local model layout.
+
+    Under `--layer-slice START END` the model holds global layers START.. as its layers 0..: streams are global.
+    """
+    layer_slice = get_args().layer_slice
+    first = layer_slice[0] if layer_slice else 0
     layer_indices = []
     for vp_stage, model in enumerate(models):
         config = model.module.config
@@ -20,5 +26,5 @@ def register_replay_list_moe(replay_list, replay_data, *, models, **_kwargs):
             layer_indices.append(layer_id)
 
     for replay_idx, layer_idx in enumerate(layer_indices):
-        layer_data = replay_data[:, layer_idx]
+        layer_data = replay_data[:, first + layer_idx]
         replay_list[replay_idx].record(layer_data)
