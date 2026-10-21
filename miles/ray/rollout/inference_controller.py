@@ -154,6 +154,7 @@ class InferenceController:
     @with_lock
     async def prepare_eval(self, model_id: str | None = None) -> None:
         await self._health_monitoring_resume(model_id)
+        await dashboard_hooks.register_engines(self.servers, provider=self._engine_provider)
 
     @with_lock
     async def dispose(self) -> None:
