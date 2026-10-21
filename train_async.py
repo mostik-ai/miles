@@ -66,6 +66,10 @@ async def train(args, *, disposer: Disposer):
         await inference_controller.prepare_rollout(rollout_id)
         return await rollout_executor.get(rollout_id)
 
+    from miles.utils import save_cadence  # here, not above: the two pinned trees' import blocks differ
+
+    save_cadence.start()
+
     # async train loop.
     rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -96,10 +100,9 @@ async def train(args, *, disposer: Disposer):
         remove_rollout_data_refs(args, rollout_data_curr_ref)
 
         external_save = args.save_trigger_sentinel is not None and os.path.exists(args.save_trigger_sentinel)
-        if external_save or should_run_periodic_action(
-            rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
-        ):
-            force_sync = external_save or rollout_id == args.num_rollout - 1
+        periodic = should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout)
+        take_save, force_sync = save_cadence.save_due(args, rollout_id, periodic, external_save)
+        if take_save:
             await save_training_model(actor_model, rollout_id, force_sync)
             if args.use_critic:
                 await save_training_model(critic_model, rollout_id, force_sync)

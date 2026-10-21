@@ -1552,6 +1552,28 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--save-interval-minutes",
+                type=float,
+                default=None,
+                help=(
+                    "Also save when this many minutes have passed since the previous save began (or since the "
+                    "start), so the recovery point is bounded in time rather than in updates, and after the last "
+                    "rollout. The save is asynchronous like a periodic one."
+                ),
+            )
+            parser.add_argument(
+                "--save-admission-path",
+                type=str,
+                default=None,
+                help=(
+                    "Publication-aware saving. A save that is due by time or count is taken only while this file "
+                    "exists, and is claimed by renaming the file to <path>.<rollout_id>; otherwise it is deferred "
+                    "to the first boundary where the file exists. The sentinel and the last rollout always save. "
+                    "A publisher creates the file while fewer checkpoints than it allows are saved but not durable "
+                    "and the newest save it granted is older than the run's save interval."
+                ),
+            )
+            parser.add_argument(
                 "--custom-megatron-post-save-hook-path",
                 type=str,
                 default=None,

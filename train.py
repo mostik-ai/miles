@@ -97,6 +97,10 @@ async def train(args, *, disposer: Disposer):
         else:
             await eval_dispatcher.dispatch(args.start_rollout_id - 1)
 
+    from miles.utils import save_cadence  # here, not above: the two pinned trees' import blocks differ
+
+    save_cadence.start()
+
     # train loop.
     # note that for async training, one can change the position of the sync operation(ray.get).
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
@@ -130,10 +134,10 @@ async def train(args, *, disposer: Disposer):
         remove_rollout_data_refs(args, rollout_data_pack)
 
         external_save = args.save_trigger_sentinel is not None and os.path.exists(args.save_trigger_sentinel)
-        if external_save or should_run_periodic_action(
-            rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout
-        ):
-            await save(rollout_id, force_sync=external_save)
+        periodic = should_run_periodic_action(rollout_id, args.save_interval, num_rollout_per_epoch, args.num_rollout)
+        take_save, force_sync = save_cadence.save_due(args, rollout_id, periodic, external_save)
+        if take_save:
+            await save(rollout_id, force_sync=force_sync)
             if external_save:
                 os.remove(args.save_trigger_sentinel)
 
