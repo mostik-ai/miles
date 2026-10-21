@@ -57,6 +57,18 @@ def _compact(routes):
     return routes
 
 
+def check_total_lengths(args, samples) -> None:
+    """Refuse samples longer than --seq-length here, before any shard is scheduled or shipped to the trainer.
+
+    Past it the trainer would fail only after the batch's transfer and part of its gradient pass, or run out of memory.
+    """
+    if (limit := getattr(args, "seq_length", None)) is None:
+        return
+    over = [(sample.index, len(sample.tokens)) for sample in samples if len(sample.tokens) > limit]
+    if over:
+        raise ValueError(f"{len(over)} samples exceed --seq-length {limit} tokens; (index, length): {over[:8]}")
+
+
 def convert_samples_to_train_data(
     args,
     samples: list[Sample] | list[list[Sample]],
@@ -69,6 +81,7 @@ def convert_samples_to_train_data(
     """
     if (f := custom_convert_samples_to_train_data_func) is not None:
         return f(args, samples)
+    check_total_lengths(args, samples)
 
     raw_rewards, rewards = _post_process_rewards(
         args,
