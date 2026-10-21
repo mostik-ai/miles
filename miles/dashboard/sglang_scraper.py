@@ -66,12 +66,30 @@ DEFAULT_METRIC_WHITELIST = (
     "sglang_time_per_output_token_seconds_count",
     "sglang_e2e_request_latency_seconds_sum",
     "sglang_e2e_request_latency_seconds_count",
+    # KV pressure: requests retracted from a full pool and re-prefilled later (counters), and each pool's usage;
+    # sglang_token_usage is the larger of the full-attention and sliding-window pools
+    "sglang_num_retracted_reqs",
+    "sglang_num_retracted_requests_total",
+    "sglang_num_retracted_input_tokens_total",
+    "sglang_num_retracted_output_tokens_total",
+    "sglang_full_token_usage",
+    "sglang_swa_token_usage",
+    # weight refresh: the last load's wall time (one series per source label), and the engine-side receive/apply
+    # counters a refresh-telemetry SGLang patch adds; a family the engine does not export is simply absent
+    "sglang_weight_load_duration_seconds",
+    "sglang_weight_receive_seconds_total",
+    "sglang_weight_apply_seconds_total",
+    "sglang_weight_update_bytes_total",
+    "sglang_weight_update_tensors_total",
+    "sglang_weight_update_calls_total",
+    "sglang_weight_update_failures_total",
 )
 
 # label subset passed through to EngineSample.labels: engine_type (PD
-# prefill/decode) and dp_rank (dp-attention engines export one sample per
-# dp rank; dropping the label would fold the ranks into one series)
-KEPT_LABELS = ("engine_type", "dp_rank")
+# prefill/decode), dp_rank (dp-attention engines export one sample per
+# dp rank; dropping the label would fold the ranks into one series) and
+# source (a weight load's origin: disk, distributed, tensor or ipc)
+KEPT_LABELS = ("engine_type", "dp_rank", "source")
 
 
 class ScrapeMode(StrEnum):
