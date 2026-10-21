@@ -230,6 +230,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         verify_megatron_parallel_state(self.model)
 
+
         self._asleep = False
         self._grad_buffer_paused = False
 
@@ -257,6 +258,8 @@ class MegatronTrainRayActor(TrainRayActor):
         load_output = self._load_state_core(
             checkpointing_context=checkpointing_context, overrider_for_loading=heal_load_overrides
         )
+        if args.start_rollout_id is None:  # the rollout this job's loop starts from, as the driver resolves it
+            args.start_rollout_id = load_output.start_rollout_id
 
         self._init_training_state()
 
@@ -314,6 +317,10 @@ class MegatronTrainRayActor(TrainRayActor):
                     build_lora_config(args, target_modules=args.lora_adapter_targets) if is_lora else None
                 ),
             )
+            # One version per update, the first before rollout 0, on one clock across the run's jobs: a resumed job's
+            # first update installs one past the version its checkpoint's job served at the save, so the versions
+            # saved with the checkpoint (its rollout frontier's groups) compare with this job's by their true lag.
+            self.weight_updater.weight_version = -(-args.start_rollout_id // args.update_weights_interval)
 
         if publish_snapshots:
             is_lora = is_lora_enabled(args)

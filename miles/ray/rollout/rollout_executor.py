@@ -296,12 +296,14 @@ class RolloutExecutor:
     # TODO the train and eval rollout functions will become one object, so one save/load is enough here
     def save(self, rollout_id: int) -> None:
         self._dump_writer.flush()
-        self.data_source.save(rollout_id)
+        # the rollout functions' state (a fully-async frontier) before the data cursor, so a checkpoint's cursor
+        # appears only once the rest of its rollout state is written: publication starts from the cursor
         if not self.use_legacy_rollout_v1:
             if self.generate_rollout is not None:
                 self.generate_rollout.save(rollout_id)
             if (eval_fn := self.eval_generate_rollout) is not None and eval_fn is not self.generate_rollout:
                 eval_fn.save(rollout_id)
+        self.data_source.save(rollout_id)
         event_logger_checkpoint.snapshot(self.args, rollout_id)
 
     def load(self, rollout_id: int | None = None) -> None:

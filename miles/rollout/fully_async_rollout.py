@@ -21,6 +21,7 @@ import logging
 from dataclasses import replace
 
 from miles.backends.megatron_utils.megatron_config import resolve_megatron_config
+from miles.rollout import async_frontier
 from miles.rollout.base_types import (
     BaseRolloutFn,
     RolloutFnConstructorInput,
@@ -86,6 +87,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._output: DataBuffer | None = None
         # prompt groups submitted and not yet accepted by the buffer: pending snapshots read them
         self._active: dict[asyncio.Task, list[Sample]] = {}
+        # completed groups a checkpoint's frontier persisted, queued once the buffer exists
+        self._restored: list[DataBufferInput] = []
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
@@ -98,6 +101,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             self._output = buffer_cls(
                 DataBufferConstructorInput(args=self.args, unused_handler_fn=self._handle_unused)
             )
+            if self._restored:
+                self._output.restore(self._restored)
+                self._restored = []
             self._worker = asyncio.create_task(self._worker_loop())
             logger.info("Started fully-async rollout worker")
         return await self._drain(input)
@@ -204,7 +210,29 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
             logger.warning("Pending-work snapshot at %s failed", reason, exc_info=True)
 
     def save(self, rollout_id: int) -> None:
-        self.snapshot("save", rollout_id)
+        """The save's pending snapshot and the rollout frontier, taken in one step of the rollout loop, then written
+        beside the data cursor (miles/rollout/async_frontier.py)."""
+
+        async def capture() -> dict:
+            self.report_pending("save", rollout_id)
+            completed = self._output.completed() if self._output is not None else list(self._restored)
+            return async_frontier.capture(self.data_source, completed, list(self._active.values()))
+
+        frontier = run(capture())
+        async_frontier.write(frontier, async_frontier.frontier_path(self.args.save, rollout_id))
+
+    def load(self, rollout_id: int | None) -> None:
+        """Continue from the frontier saved with the loaded checkpoint, if it has one: its cursor, its prompts first
+        in line, and its completed groups back in the buffer with the weight versions they were generated at."""
+        frontier = async_frontier.read(self.args.load, rollout_id)
+        if frontier is not None:
+            self._restored = async_frontier.restore(self.data_source, frontier, self.args.rollout_shuffle)
+            logger.info(
+                "Restored the rollout frontier of checkpoint %s: %d completed groups, %d to regenerate",
+                rollout_id,
+                len(self._restored),
+                len(frontier["regenerate"]),
+            )
 
     # -------------------------- consumer --------------------------
 

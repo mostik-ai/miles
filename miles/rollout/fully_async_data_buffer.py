@@ -225,6 +225,19 @@ class DefaultDataBuffer(DataBuffer):
             return False
         return True
 
+    def completed(self) -> list[DataBufferInput]:
+        """The completed groups waiting for training, in the order drains take them (a checkpoint's frontier)."""
+        return list(self._buffer)
+
+    def restore(self, entries: list[DataBufferInput]) -> None:
+        """Queue, ahead of new work, the completed groups a checkpoint's frontier persisted. They keep the weight
+        versions they were generated at, and the trainer's version clock continues across the resume (the Megatron
+        actor seeds it from the start rollout), so the stale filter judges them by their true lag."""
+        self._buffer[:0] = entries
+        self._metric_peak_groups = max(self._metric_peak_groups, len(self._buffer))
+        for entry in entries:
+            record_group(self._args, entry.group, "restored")
+
     def pending(self) -> dict[int, int]:
         """The completed groups waiting for training, by group index, with their response tokens."""
         return {
