@@ -262,6 +262,7 @@ def get_log_probs_and_entropy(
             sampling_mask=sampling_mask,
             temperature=1.0 if args.true_on_policy_mode else args.rollout_temperature,
             debug_unified_grad_fused_logprob=args.debug_unified_grad_fused_logprob,
+            recompute=getattr(args, "recompute_log_probs", False),
         )
 
         log_probs_list.append(log_prob.squeeze(-1))

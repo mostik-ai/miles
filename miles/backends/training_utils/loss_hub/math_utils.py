@@ -7,6 +7,7 @@ from pathlib import Path
 import torch
 import torch.distributed as dist
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 
 from miles.backends.training_utils.cp_utils import (
     all_gather_with_cp,
@@ -979,7 +980,10 @@ def calculate_log_probs_and_entropy(
     sampling_mask: torch.Tensor | None = None,
     temperature: float = 1.0,
     debug_unified_grad_fused_logprob: bool = False,
+    recompute: bool = False,
 ):
+    if recompute and (true_on_policy or chunk_size <= 0):
+        raise ValueError("Log-probability recomputation requires positive chunks and the native TP loss path")
     if true_on_policy:
         assert temperature == 1.0, "true-on-policy scales logits in _iter_response_chunks"
         return _calculate_log_probs_and_entropy_true_on_policy(
@@ -1002,6 +1006,15 @@ def calculate_log_probs_and_entropy(
         with torch.no_grad():
             return compute_entropy_from_logits(_upcast_chunk_to_fp32(logits_chunk.detach(), temperature), tp_group)
 
+    def compute_chunk(chunk, targets, support):
+        return compute_log_probs(
+            _upcast_chunk_to_fp32(chunk, temperature),
+            targets,
+            tp_group,
+            sampling_mask=support,
+            debug_unified_grad_fused_logprob=debug_unified_grad_fused_logprob,
+        )
+
     if logits.size(0) != 0:
         if chunk_size > 0:
             num_chunks = (logits.size(0) - 1) // chunk_size + 1
@@ -1014,13 +1027,12 @@ def calculate_log_probs_and_entropy(
             for tokens_chunk, logits_chunk, sampling_mask_chunk in zip(
                 tokens_chunks, logits_chunks, sampling_mask_chunks, strict=True
             ):
-                log_prob = compute_log_probs(
-                    _upcast_chunk_to_fp32(logits_chunk, temperature),
-                    tokens_chunk,
-                    tp_group,
-                    sampling_mask=sampling_mask_chunk,
-                    debug_unified_grad_fused_logprob=debug_unified_grad_fused_logprob,
-                )
+                if recompute and torch.is_grad_enabled() and logits_chunk.requires_grad:
+                    log_prob = checkpoint(
+                        compute_chunk, logits_chunk, tokens_chunk, sampling_mask_chunk, use_reentrant=False
+                    )
+                else:
+                    log_prob = compute_chunk(logits_chunk, tokens_chunk, sampling_mask_chunk)
                 log_probs.append(log_prob)
             log_prob = torch.cat(log_probs, dim=0)
             if with_entropy:

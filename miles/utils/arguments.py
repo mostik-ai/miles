@@ -573,6 +573,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "--log-probs-chunk-size", type=int, default=-1, help="Chunk size to compute log probs to save memory"
             )
             parser.add_argument(
+                "--recompute-log-probs",
+                action="store_true",
+                help="Recompute native TP log-probability chunks in backward instead of retaining their softmax tensors.",
+            )
+            parser.add_argument(
                 "--indep-dp",
                 action="store_true",
                 default=False,
