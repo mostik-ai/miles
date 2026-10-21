@@ -965,6 +965,25 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-pipelined",
+                action="store_true",
+                help=(
+                    "Broadcast protocol: post a bucket (engine RPCs and broadcasts) and return, so the next bucket's "
+                    "export overlaps its transfer; before posting the next, wait for both engines' acks and release "
+                    "it. One bucket in flight; engines still receive buckets one at a time, in order."
+                ),
+            )
+            parser.add_argument(
+                "--update-weight-flattened",
+                action="store_true",
+                help=(
+                    "Broadcast protocol: pack each bucket back to back into one of two reused byte slots, widest "
+                    "dtype first so every slice is aligned, and send it as one broadcast that engines receive with "
+                    "load_format flattened_bucket. A slot is reused only after its bucket was acked; both are "
+                    "released when the sync ends."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-reuse-conversion-tasks",
                 action="store_true",
                 help=(
