@@ -608,6 +608,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--load-read-threads",
+                type=int,
+                default=1,
+                help=(
+                    "Threads each rank uses to read its share of a torch_dist checkpoint when loading. Items are read "
+                    "and deserialized concurrently and handed to the load planner one at a time on the loading "
+                    "thread. 1 keeps torch's sequential reader."
+                ),
+            )
+            parser.add_argument(
                 "--mfu-peak-tflops",
                 type=float,
                 default=None,

@@ -18,6 +18,7 @@ from miles_plugins.models.deepseek_v4.arguments import assert_checkpoint_is_curr
 
 from .lora.utils import is_lora_enabled, is_lora_model, load_lora_adapter, save_lora_checkpoint
 from .model_provider import LinearForLastLayer
+from .parallel_read import threaded_reads
 
 try:
     # Here we patch out the `validate_non_overlapping_shards_metadata` in both functions
@@ -119,13 +120,14 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, checkpointing_con
     if has_local_checkpoint_manager or _is_megatron_checkpoint(load_path):
         if not has_local_checkpoint_manager and is_dsv4_model(args):
             assert_checkpoint_is_current(load_path)
-        result = _load_checkpoint_megatron(
-            ddp_model=ddp_model,
-            optimizer=optimizer,
-            opt_param_scheduler=opt_param_scheduler,
-            checkpointing_context=checkpointing_context,
-            skip_load_to_model_and_opt=skip_load_to_model_and_opt,
-        )
+        with threaded_reads(args.load_read_threads):
+            result = _load_checkpoint_megatron(
+                ddp_model=ddp_model,
+                optimizer=optimizer,
+                opt_param_scheduler=opt_param_scheduler,
+                checkpointing_context=checkpointing_context,
+                skip_load_to_model_and_opt=skip_load_to_model_and_opt,
+            )
     else:
         result = _load_checkpoint_hf(
             ddp_model=ddp_model,
