@@ -258,21 +258,20 @@ class MilesRouter:
         }
 
     def build_proxy_response(self, result: dict) -> Response:
-        """Build HTTP response from proxy result."""
-        content = result["response_body"]
-        status_code = result["status_code"]
-        headers = result["headers"]
-        headers = {
-            k: v
-            for k, v in headers.items()
-            if k.lower() not in ("content-length", "transfer-encoding", "server", "date")
-        }
-        content_type = headers.get("content-type", "")
-        try:
-            data = json.loads(content)
-            return JSONResponse(content=data, status_code=status_code, headers=headers)
-        except Exception:
-            return Response(content=content, status_code=status_code, headers=headers, media_type=content_type)
+        """The engine's reply as it came: its bytes, status and content type, without hop-by-hop headers.
+
+        Replies carry routed experts as base64, about 2 KB per token (34 MB for a capped response); parsing and
+        re-serializing them on this single event loop cost CPU per reply and changed nothing. httpx has already
+        decoded any content encoding, so that header goes too.
+        """
+        hop = ("content-length", "transfer-encoding", "content-encoding", "server", "date")
+        headers = {k: v for k, v in result["headers"].items() if k.lower() not in hop}
+        return Response(
+            content=result["response_body"],
+            status_code=result["status_code"],
+            headers=headers,
+            media_type=headers.get("content-type", ""),
+        )
 
     async def add_worker(self, request: Request):
         """Add a new worker to the router.
