@@ -35,6 +35,7 @@ from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.audit_utils.witness.module import witness_dump_and_clear_stale
 from miles.utils.dumper_utils import DumperMegatronUtil, DumperPhase
 from miles.utils.lora.utils import is_multi_lora_enabled
+from miles.utils import profile_window
 from miles.utils.memory_utils import clear_memory
 from miles.utils.test_utils.ft_test_actions import FTTestActionActorExecutor
 from miles.utils.tracking_utils.structured_log import log_structured
@@ -456,6 +457,8 @@ def run_forward_backward_pass(
             (loss, num_elems, {"keys": list[str], "values": torch.Tensor}).
         """
 
+        if not forward_only:
+            profile_window.WINDOW.step()
         # Get the batch.
         batch = get_batch(
             data_iterator,

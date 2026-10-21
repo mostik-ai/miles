@@ -46,6 +46,7 @@ from miles.utils.types import RolloutBatch
 from miles.utils.workers.naming import compute_cell_id
 from miles.utils.workers.rpc.common.wire_types import Pickled
 
+from ...utils import profile_window
 from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.data import DataIterator, get_data_iterator, get_num_rollouts, get_rollout_data
@@ -162,6 +163,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 f"--profile-target {' '.join(sorted(unsupported))} is not supported for Megatron backend"
             )
         self.prof = TrainProfiler(args)
+        profile_window.WINDOW.configure(args, dist.get_rank())
 
         # read config and tokenizer serialized to prevent concurrent writing bug.
         for i in range(dist.get_world_size()):
@@ -788,6 +790,7 @@ class MegatronTrainRayActor(TrainRayActor):
             routing_replay_manager.measure_overlap = (
                 self.args.dump_details is not None and self._use_rollout_replay(routing_replay_manager)
             )
+            profile_window.WINDOW.begin_update(rollout_id)
             try:
                 with timer("actor_train"):
                     train_step_outcome = train(
@@ -804,6 +807,7 @@ class MegatronTrainRayActor(TrainRayActor):
                     )
             finally:
                 routing_replay_manager.measure_overlap = False
+                profile_window.WINDOW.end_update()
 
             self.prof.step(rollout_id=rollout_id)
 

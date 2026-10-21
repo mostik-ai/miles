@@ -2365,6 +2365,33 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 choices=["torch", "memray"],
                 default="torch",
             )
+            parser.add_argument(
+                "--profile-window-rollout",
+                type=int,
+                default=None,
+                help="Profile training microbatches of this update (miles/utils/profile_window.py).",
+            )
+            parser.add_argument(
+                "--profile-window-microbatches",
+                type=int,
+                nargs=2,
+                default=[0, 5],
+                help="The window's first training forward microbatch and the one that closes it.",
+            )
+            parser.add_argument(
+                "--profile-window-ranks",
+                type=int,
+                nargs="*",
+                default=None,
+                help="Global ranks that profile the window; every rank when unset.",
+            )
+            parser.add_argument(
+                "--profile-window-torch",
+                action="store_true",
+                help="Record the window with torch.profiler (CPU and CUDA activity, shapes) into --tensorboard-dir.",
+            )
+            parser.add_argument("--profile-window-stack", action="store_true", help="Record Python stacks too.")
+            parser.add_argument("--profile-window-memory", action="store_true", help="Record allocations too.")
             parser.add_argument("--check-weight-update-equal", action="store_true")
             parser.add_argument(
                 "--check-weight-update-selector",
