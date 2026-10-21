@@ -183,23 +183,54 @@ def add_sglang_arguments(parser):
 
 
 def validate_args(args):
+    """Derive the serving values other flags decide, refusing a command line that also names them.
+
+    Raises:
+        AssertionError: a flag asks for something the placement, the on-policy contract or the session
+            server has already decided, which used to be overwritten here without a word.
+    """
+    from miles.utils.cli_dest_utils import dests_on_command_line
+
+    named = dests_on_command_line()
+
+    assert not ("sglang_tp_size" in named and args.sglang_tp_size != args.rollout_num_gpus_per_engine), (
+        f"--sglang-tp-size {args.sglang_tp_size} is not the engine size --rollout-num-gpus-per-engine "
+        f"{args.rollout_num_gpus_per_engine} places; the rollout placement owns tp"
+    )
     args.sglang_tp_size = args.rollout_num_gpus_per_engine
 
-    if args.true_on_policy_mode:
+    deterministic = args.true_on_policy_mode or getattr(args, "recompute_logprobs_via_prefill", False)
+    assert not (deterministic and "sglang_enable_deterministic_inference" in named
+                and not args.sglang_enable_deterministic_inference), (
+        "--true-on-policy-mode and --recompute-logprobs-via-prefill both need deterministic inference, so "
+        "--no-sglang-enable-deterministic-inference cannot hold"
+    )
+    if deterministic:
         args.sglang_enable_deterministic_inference = True
-
     if getattr(args, "recompute_logprobs_via_prefill", False):
         args.sglang_enable_prefill_only_deterministic_inference = True
-        args.sglang_enable_deterministic_inference = True
 
     if args.sglang_dp_size > 1:
         assert args.sglang_enable_dp_attention
 
     if args.sglang_enable_dp_attention:
+        assert not ("router_dp_aware" in named and not args.router_dp_aware), (
+            "--sglang-enable-dp-attention splits each engine into data-parallel ranks the router has to "
+            "address, so --no-router-dp-aware cannot hold"
+        )
         args.router_dp_aware = True
 
-    if args.sglang_router_policy is None and args.use_session_server:
-        args.sglang_router_policy = "manual"
+    if args.use_session_server:
+        assert args.sglang_router_policy in (None, "consistent_hashing", "manual"), (
+            f"--use-session-server pins every session to the engine that holds it, which only the routing-key "
+            f"policies do, but --sglang-router-policy asks for {args.sglang_router_policy}"
+        )
+        if args.sglang_router_policy is None:
+            args.sglang_router_policy = "manual"
+        assert not ("router_assignment_mode" in named and args.router_assignment_mode == "random"), (
+            "--use-session-server places each new session itself, and random assignment would undo that; "
+            "pass --router-assignment-mode min_load or drop the flag"
+        )
         if args.router_assignment_mode == "random":
             args.router_assignment_mode = "min_load"
 

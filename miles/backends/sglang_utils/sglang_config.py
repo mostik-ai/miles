@@ -140,6 +140,12 @@ class _RawSglangConfig(FrozenStrictBaseModel):
 
 # ---------------------------- resolved config -----------------------------
 
+# Every field the allocator decides from the group's own num_gpus/num_gpus_per_engine.
+_PLACEMENT_OWNED_ARGS = frozenset(
+    {"host", "port", "gated_launch_port", "tp_size", "nnodes", "node_rank", "dist_init_addr", "nccl_port",
+     "base_gpu_id", "gpu_id_step"}
+)
+
 
 class ServerGroupConfig(FrozenStrictBaseModel):
     worker_type: Literal["regular", "prefill", "decode", "placeholder"]
@@ -163,9 +169,10 @@ class ServerGroupConfig(FrozenStrictBaseModel):
         default_model_path: str,
         offset_cursor: "_OffsetCursor",
     ) -> "ServerGroupConfig":
-        assert not ({"host", "port", "gated_launch_port"} & set(raw.overrides)), (
-            f"sglang_overrides must not override host/port ({raw.overrides=}): the rollout process derives "
-            f"each engine's url from the addr allocator, so an override would make it talk to the wrong endpoint"
+        assert not (placed := _PLACEMENT_OWNED_ARGS & set(raw.overrides)), (
+            f"sglang_overrides must not set {sorted(placed)} ({raw.overrides=}): the allocator derives every "
+            f"engine's url, ranks and GPU slots from num_gpus and num_gpus_per_engine, so an override would "
+            f"reserve one topology and launch another"
         )
 
         rollout_pg_offset = _compute_rollout_offset(args)
@@ -232,15 +239,12 @@ class ModelConfig(FrozenStrictBaseModel):
             assert effective_model_path == args.hf_checkpoint, "Tinker engines must load the trainer's base checkpoint"
             update_weights = False
         elif update_weights is None:
-            if effective_model_path != args.hf_checkpoint:
-                logger.warning(
-                    f"Model '{raw.name}' uses model_path='{effective_model_path}' which differs "
-                    f"from hf_checkpoint='{args.hf_checkpoint}'. Defaulting update_weights to False. "
-                    f"Set update_weights explicitly in the config to suppress this warning."
-                )
-                update_weights = False
-            else:
-                update_weights = True
+            assert effective_model_path == args.hf_checkpoint, (
+                f"Model '{raw.name}' serves model_path='{effective_model_path}', not the trainer's "
+                f"hf_checkpoint='{args.hf_checkpoint}', so whether training refreshes it cannot be guessed from "
+                f"the two strings; set update_weights in the sglang config"
+            )
+            update_weights = True
 
         return cls(
             name=raw.name,
@@ -349,15 +353,26 @@ def _eval_sglang_overrides(args) -> dict:
         "enable_return_routed_experts": False,
         "enable_return_indexer_topk": False,
     }
+    eval_overrides = collect_eval_sglang_overrides(args)
     if args.eval_num_gpus_per_engine != args.rollout_num_gpus_per_engine:
         # Inheriting these across a different tp gives an engine SGLang refuses to boot.
         tp_coupled = ("dp_size", "pp_size", "ep_size", "attn_cp_size")
+        inherited = {
+            name: value
+            for name in tp_coupled
+            if name not in eval_overrides and (value := getattr(args, f"sglang_{name}", None)) not in (None, 1)
+        }
+        assert not inherited, (
+            f"eval tp={args.eval_num_gpus_per_engine} differs from rollout tp={args.rollout_num_gpus_per_engine}, "
+            f"so the eval engines cannot inherit {inherited}; name every one of them with the matching "
+            f"--eval-sglang-* flag"
+        )
         overrides |= dict.fromkeys(tp_coupled, 1)
         logger.info(
             f"Eval tp={args.eval_num_gpus_per_engine} != rollout tp={args.rollout_num_gpus_per_engine}; "
-            f"{', '.join(tp_coupled)} default to 1. Override with --eval-sglang-*."
+            f"{', '.join(tp_coupled)} default to 1."
         )
-    return overrides | collect_eval_sglang_overrides(args)
+    return overrides | eval_overrides
 
 
 def _compute_eval_raw_model(raw: _RawModelConfig, args) -> _RawModelConfig:

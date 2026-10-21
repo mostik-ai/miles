@@ -142,6 +142,10 @@ def _compute_server_args(
     if args.use_rollout_indexer_replay:
         kwargs["enable_return_indexer_topk"] = True
     if args.fp16:
+        assert args.sglang_dtype in (None, "auto", "float16"), (
+            f"--fp16 trains in float16 and the engine serves those very weights, but --sglang-dtype "
+            f"{args.sglang_dtype} asks it to serve another dtype"
+        )
         kwargs["dtype"] = "float16"
     if engine_info_bootstrap_port is not None:
         kwargs["engine_info_bootstrap_port"] = engine_info_bootstrap_port
@@ -192,11 +196,11 @@ def _compute_server_args(
             kwargs[name] = getattr(args, f"sglang_{name}")
         unused_keys.discard(name)
 
-    # for compatibility with old args
-    if len(unused_keys) > 0:
-        logger.info(f"Warning: The following arguments is not supported in the current sglang: {unused_keys}.")
-        for key in unused_keys:
-            kwargs.pop(key)
+    assert not unused_keys, (
+        f"this sglang has no server argument {sorted(unused_keys)}, so the engine would start on its own "
+        f"defaults for them instead; drop them from the sglang config, or rename them to the fields this "
+        f"sglang serves"
+    )
 
     if is_multi_lora_enabled(args):
         assert kwargs.get("load_format") != "dummy", "Tinker engines must load the frozen base from disk"
