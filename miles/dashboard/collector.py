@@ -154,6 +154,10 @@ class DashboardCollector:
         self._store.write_meta(Meta(run_name=config.run_name, start_ts=config.start_ts, args=config.args_snapshot))
         self._lock = threading.Lock()
         self._dropped_since_flush = 0
+        # records dropped past the cap, per stream since start: reported in the metrics stream from a first zero row,
+        # so accounting that reads the store can tell a complete stream from one with a hole
+        self._dropped_total: dict[str, int] = {}
+        self._store.append(self._dropped_record())
         self._last_topology: TopologySnapshot | None = None
         self._scraper: SglangScraper | None = None
         self._scraper_http_get = scraper_http_get
@@ -298,9 +302,17 @@ class DashboardCollector:
     def _append(self, record: Record) -> None:
         with self._lock:
             if self._store.buffered_count(record.stream) >= self.MAX_BUFFERED_PER_STREAM:
-                self._dropped_since_flush += self._store.drop_oldest_buffered(record.stream)
+                dropped = self._store.drop_oldest_buffered(record.stream)
+                self._dropped_since_flush += dropped
+                self._dropped_total[record.stream.value] = self._dropped_total.get(record.stream.value, 0) + dropped
             self._store.append(record)
             self._update_latest(record)
+
+    def _dropped_record(self) -> MetricsRecord:
+        """The cumulative per-stream drop counts, as one metrics row (step key ``dashboard/collector``)."""
+        counts = {f"dashboard/dropped_records_total/{stream}": self._dropped_total.get(stream, 0)
+                  for stream in ("trajectories", "metrics", "phases", "engine_series")}
+        return MetricsRecord(ts=time.time(), step_key="dashboard/collector", step=None, metrics=counts)
 
     def _update_latest(self, record: Record) -> None:
         if isinstance(record, GpuSample):
@@ -352,6 +364,7 @@ class DashboardCollector:
                     self._dropped_since_flush,
                 )
                 self._dropped_since_flush = 0
+                self._store.append(self._dropped_record())
             try:
                 self._store.flush()
             except OSError:

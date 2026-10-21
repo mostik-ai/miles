@@ -172,6 +172,8 @@ class TrajectorySink:
         self._lock = threading.Lock()
         self._last_flush = time.monotonic()
         self._warner = RateLimitedWarner(logger)
+        # events this sink failed to build or push: accounting reads the count, so a loss is never silent
+        self.lost = 0
 
     # ------------------------- core-facing emitters -------------------------
 
@@ -202,7 +204,35 @@ class TrajectorySink:
                 self._emit(TrajectoryEventKind.GEN_END, sample, ts=segment["t1"], turn=segment["turn"])
         last = samples[-1]
         status = last.status.value if getattr(last, "status", None) is not None else ""
-        self._emit(TrajectoryEventKind.ATTEMPT_END, last, detail=status)
+        tokens = sum(getattr(sample, "response_length", 0) or 0 for sample in samples)
+        self._emit(TrajectoryEventKind.ATTEMPT_END, last, detail=status, tokens=tokens)
+
+    def reward_start(self, sample) -> None:
+        self._emit(TrajectoryEventKind.REWARD_START, sample)
+
+    def reward_end(self, sample, detail: str) -> None:
+        """``detail``: ok, unscored (the reward came back without a value), timeout or error."""
+        self._emit(TrajectoryEventKind.REWARD_END, sample, detail=detail)
+
+    def record(self, kind: str, *, group_index: int = -1, detail: str = "", tokens: int = 0, data=None) -> None:
+        """A work-ledger record that belongs to no single sample: a group decision or a pending snapshot."""
+        try:
+            event = TrajectoryEvent(
+                ts=time.time(),
+                kind=kind,
+                sample_index=-1,
+                group_index=group_index,
+                turn=-1,
+                weight_version="",
+                detail=detail,
+                tokens=tokens,
+                data=data,
+            )
+        except Exception:
+            self.lost += 1
+            self._warner.warn("dashboard trajectory sink failed; dropping events")
+            return
+        self._append(event)
 
     def gen_span(self, sample, t0: float, t1: float, turn: int, detail: str = "") -> None:
         self._emit(TrajectoryEventKind.GEN_START, sample, ts=t0, turn=turn)
@@ -214,7 +244,9 @@ class TrajectorySink:
 
     # ------------------------------ internals -------------------------------
 
-    def _emit(self, kind: str, sample, *, ts: float | None = None, turn: int = -1, detail: str = "") -> None:
+    def _emit(
+        self, kind: str, sample, *, ts: float | None = None, turn: int = -1, detail: str = "", tokens: int = 0
+    ) -> None:
         try:
             versions = [span.version for span in getattr(sample, "all_weight_version_spans", None) or []]
             event = TrajectoryEvent(
@@ -225,13 +257,26 @@ class TrajectorySink:
                 turn=turn,
                 weight_version=str(versions[-1]) if versions else "",
                 detail=detail,
+                tokens=tokens,
             )
-            with self._lock:
-                self._buffer.append(event)
-                batch = self._take_batch_if_due()
-            if batch:
-                self._handle.push_trajectories.remote(batch)
         except Exception:
+            self.lost += 1
+            self._warner.warn("dashboard trajectory sink failed; dropping events")
+            return
+        self._append(event)
+
+    def _append(self, event: TrajectoryEvent) -> None:
+        with self._lock:
+            self._buffer.append(event)
+            batch = self._take_batch_if_due()
+        if batch:
+            self._push(batch)
+
+    def _push(self, batch: list[TrajectoryEvent]) -> None:
+        try:
+            self._handle.push_trajectories.remote(batch)
+        except Exception:
+            self.lost += len(batch)
             self._warner.warn("dashboard trajectory sink failed; dropping events")
 
     def _take_batch_if_due(self) -> list[TrajectoryEvent] | None:
@@ -242,13 +287,10 @@ class TrajectorySink:
         return batch
 
     def flush(self) -> None:
-        try:
-            with self._lock:
-                batch, self._buffer = self._buffer, []
-            if batch:
-                self._handle.push_trajectories.remote(batch)
-        except Exception:
-            self._warner.warn("dashboard trajectory sink flush failed; dropping events")
+        with self._lock:
+            batch, self._buffer = self._buffer, []
+        if batch:
+            self._push(batch)
 
 
 _phase_sink: PhaseSink | None = None

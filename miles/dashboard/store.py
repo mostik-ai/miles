@@ -185,6 +185,24 @@ class TrajectoryEventKind(StrEnum):
     TOOL_START = "tool_start"
     TOOL_END = "tool_end"
     ATTEMPT_END = "attempt_end"
+    # work-ledger records: no lifecycle lane, read by accounting (see TrajectorySink.group / pending)
+    REWARD_START = "reward_start"
+    REWARD_END = "reward_end"
+    GROUP = "group"
+    PENDING = "pending"
+
+
+# the kinds that draw a sample's lifecycle lane
+LANE_KINDS = frozenset(
+    {
+        TrajectoryEventKind.ATTEMPT_START,
+        TrajectoryEventKind.GEN_START,
+        TrajectoryEventKind.GEN_END,
+        TrajectoryEventKind.TOOL_START,
+        TrajectoryEventKind.TOOL_END,
+        TrajectoryEventKind.ATTEMPT_END,
+    }
+)
 
 
 @dataclass
@@ -195,7 +213,11 @@ class TrajectoryEvent(Record):
     dump join uses, so the read side can resolve a consuming step's batch to
     its events. ``turn`` is 1-based for gen/tool segments and -1 for attempt
     boundaries; ``weight_version`` is the engine-reported version of the
-    segment ("" when unknown)."""
+    segment ("" when unknown).
+
+    ``tokens`` is the response tokens an attempt_end or group record accounts
+    for; ``data`` holds a group decision's or pending snapshot's fields. Both
+    default so stores written before them still read."""
 
     stream: ClassVar[Stream] = Stream.TRAJECTORIES
     ts: float
@@ -205,6 +227,8 @@ class TrajectoryEvent(Record):
     turn: int
     weight_version: str
     detail: str
+    tokens: int = 0
+    data: dict | None = None
 
 
 @dataclass
@@ -666,6 +690,8 @@ class MetricStore:
         running, or clipped by the window) yields t1=None and vice versa."""
         grouped: dict[int, list[TrajectoryEvent]] = {}
         for event in self.trajectory_events(t0, t1):
+            if event.kind not in LANE_KINDS:
+                continue
             if sample_indices is not None and event.sample_index not in sample_indices:
                 continue
             grouped.setdefault(event.sample_index, []).append(event)

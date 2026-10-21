@@ -45,7 +45,9 @@ from miles.rollout.generate_utils.sample_utils import reward_log_summary, sample
 from miles.rollout.inference_rollout.inference_rollout_common import GenerateState, generate_and_rm_group
 from miles.rollout.inference_rollout.inference_rollout_eval import run_eval_datasets
 from miles.rollout.submission_scheduler import make_submission_scheduler
+from miles.utils.async_utils import run
 from miles.utils.function_registry import load_function
+from miles.utils.lifecycle import TrajectoryLifecycle
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         self._producer_resumed = asyncio.Event()
         self._producer_resumed.set()
         self._output: DataBuffer | None = None
+        # prompt groups submitted and not yet accepted by the buffer: pending snapshots read them
+        self._active: dict[asyncio.Task, list[Sample]] = {}
 
     async def __call__(self, input: RolloutFnInput) -> RolloutFnOutput:
         if input.evaluation:
@@ -142,7 +146,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         return DataBufferInput(prompt_group=prompt_group, group=result)
 
     async def _worker_loop(self) -> None:
-        active: dict[asyncio.Task, list[Sample]] = {}
+        active = self._active
         while True:
             await self._producer_resumed.wait()
             while self._scheduler.has_capacity(pending_groups=len(active), group_budget=self._max_in_flight_groups()):
@@ -150,8 +154,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
                 active[task] = prompt_group
             done, _ = await self._scheduler.wait_for_progress(set(active))
             for task in done:
-                entry = self._collect_group_result(task, active.pop(task))
-                await self._output.put(entry)
+                # in flight until the buffer accepts it: a put blocked on a full buffer still owns the group
+                await self._output.put(self._collect_group_result(task, active[task]))
+                del active[task]
 
     def _collect_group_result(self, task: asyncio.Task, prompt_group: list[Sample]) -> DataBufferInput:
         if not task.cancelled():
@@ -164,13 +169,52 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         return DataBufferInput(
             prompt_group=prompt_group,
             group=[replace(sample, status=Sample.Status.ABORTED) for sample in prompt_group],
+            cancelled=True,
         )
+
+    def report_pending(self, reason: str, rollout_id: int | None = None) -> None:
+        """A work-ledger snapshot of the groups this producer owns that training has not taken: in flight (with the
+        response tokens of their finished samples), completed in the buffer, and queued for regeneration.
+
+        Taken at each drain, save and dispose, on the rollout event loop, so it sees one consistent state.
+        """
+        sink = TrajectoryLifecycle().sink
+        if sink is None:
+            return
+        try:
+            active = self._active.values()
+            in_flight = {int(group[0].group_index): int(sum(s.response_length for s in group)) for group in active}
+            completed = getattr(self._output, "pending", dict)()
+            retry = [int(group[0].group_index) for group in getattr(self.data_source, "buffer", [])]
+            data = {"rollout_id": rollout_id, "in_flight": in_flight, "completed": completed, "retry": retry}
+            tokens = sum(in_flight.values()) + sum(completed.values())
+            sink.record("pending", detail=reason, tokens=tokens, data=data)
+        except Exception:
+            sink.lost += 1  # observability never fails the producer, and a lost record is counted
+
+    def snapshot(self, reason: str, rollout_id: int | None = None) -> None:
+        """report_pending from another thread (a save or dispose on the rollout executor)."""
+
+        async def report() -> None:
+            self.report_pending(reason, rollout_id)
+
+        try:
+            run(report())
+        except Exception:
+            logger.warning("Pending-work snapshot at %s failed", reason, exc_info=True)
+
+    def save(self, rollout_id: int) -> None:
+        self.snapshot("save", rollout_id)
 
     # -------------------------- consumer --------------------------
 
-    async def _next_group(self, *, current_version: int | None, trainer_model_id: str | None) -> DataBufferInput:
+    async def _next_group(
+        self, *, current_version: int | None, trainer_model_id: str | None, rollout_id: int | None = None
+    ) -> DataBufferInput:
         queue_get = asyncio.create_task(
-            self._output.get(current_version=current_version, trainer_model_id=trainer_model_id)
+            self._output.get(
+                current_version=current_version, trainer_model_id=trainer_model_id, rollout_id=rollout_id
+            )
         )
         try:
             while True:
@@ -203,7 +247,9 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
         while len(data) < target_data_size:
             entry = await self._next_group(
-                current_version=input.weight_version, trainer_model_id=input.trainer_model_id
+                current_version=input.weight_version,
+                trainer_model_id=input.trainer_model_id,
+                rollout_id=input.rollout_id,
             )
             assert len(entry.group) == args.n_samples_per_prompt
 
@@ -232,6 +278,7 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         if self._sample_filter is not None:
             self._sample_filter(args, data)
 
+        self.report_pending("drain", input.rollout_id)
         return RolloutFnTrainOutput(samples=data, metrics=self._output.get_metrics(input.trainer_model_id))
 
     def _recycle(self, prompt_group: list[Sample]) -> None:

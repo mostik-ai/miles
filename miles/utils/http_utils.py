@@ -212,7 +212,16 @@ def _next_actor():
     return actor
 
 
+# failed /generate attempts, each retried: the engine may have generated tokens that nobody receives
+_failed_generate_posts = 0
+
+
+def failed_generate_posts() -> int:
+    return _failed_generate_posts
+
+
 async def _post(client, url, payload, max_retries=60, action="post", headers=None):
+    global _failed_generate_posts
     retry_count = 0
     while retry_count < max_retries:
         try:
@@ -228,6 +237,8 @@ async def _post(client, url, payload, max_retries=60, action="post", headers=Non
                 output = response.text
         except Exception as e:
             retry_count += 1
+            if url.endswith("/generate"):
+                _failed_generate_posts += 1
 
             if isinstance(e, httpx.HTTPStatusError):
                 response_text = e.response.text

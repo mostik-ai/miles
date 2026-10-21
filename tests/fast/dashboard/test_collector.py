@@ -121,7 +121,8 @@ def test_flush_thread_persists_periodically(tmp_path):
     collector.push_metrics(MetricsRecord(ts=1.0, step_key="rollout/step", step=0, metrics={"a": 1}))
     time.sleep(0.2)
     try:
-        assert len(MetricStore.load(config.dashboard_dir).records[Stream.METRICS]) == 1
+        rows = MetricStore.load(config.dashboard_dir).records[Stream.METRICS]
+        assert [row.step_key for row in rows] == ["dashboard/collector", "rollout/step"]  # its drop counts, then ours
     finally:
         collector.shutdown()
 
@@ -135,7 +136,7 @@ def test_shutdown_flushes_and_stops_scraper(tmp_path):
 
     assert collector._scraper._stop_event.is_set()
     loaded = MetricStore.load(collector.config.dashboard_dir)
-    assert len(loaded.records[Stream.METRICS]) == 1
+    assert [row.step_key for row in loaded.records[Stream.METRICS]] == ["dashboard/collector", "rollout/step"]
 
 
 def _router_mode_collector(tmp_path):

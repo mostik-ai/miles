@@ -129,10 +129,30 @@ async def generate_and_rm(
             return sample
         # for multi-turn environment, a reward could be assigned to the agent.
         if sample.reward is None:
-            sample.reward = await async_rm(args, sample)
+            sample.reward = await rewarded(args, sink, sample)
 
     logger.debug(f"{log_prefix} generate_and_rm complete")
     return sample
+
+
+async def rewarded(args: Namespace, sink, sample: Sample):
+    """The sample's reward, bracketed by reward_start/reward_end lifecycle events.
+
+    reward_end's detail is ok, unscored (a reward without a value, which the buffer drops as a missing reward),
+    timeout, cancelled or error; the last three re-raise.
+    """
+    if sink is None:
+        return await async_rm(args, sample)
+    sink.reward_start(sample)
+    try:
+        reward = await async_rm(args, sample)
+    except BaseException as error:
+        kinds = {TimeoutError: "timeout", asyncio.CancelledError: "cancelled"}
+        sink.reward_end(sample, next((name for kind, name in kinds.items() if isinstance(error, kind)), "error"))
+        raise
+    value = reward.get(args.reward_key) if args.reward_key and isinstance(reward, dict) else reward
+    sink.reward_end(sample, "ok" if value is not None else "unscored")
+    return reward
 
 
 async def generate_and_rm_group(

@@ -58,6 +58,8 @@ DEFAULT_METRIC_WHITELIST = (
     "sglang_generation_tokens_total",
     "sglang_num_requests_total",
     "sglang_num_aborted_requests_total",
+    # tokens of requests aborted because their requester was gone, which nobody received (sglang-abandoned-tokens)
+    "sglang_abandoned_generation_tokens_total",
     "sglang_time_to_first_token_seconds_sum",
     "sglang_time_to_first_token_seconds_count",
     "sglang_inter_token_latency_seconds_sum",

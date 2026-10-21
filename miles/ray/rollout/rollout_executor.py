@@ -130,6 +130,8 @@ class RolloutExecutor:
     # -------------------------- lifecycle -----------------------------
 
     async def dispose(self) -> None:
+        if (snapshot := getattr(self.generate_rollout, "snapshot", None)) is not None:
+            snapshot("dispose", self.rollout_id)  # the work the run still owned when it ended
         self._dump_writer.close()
         if not self.use_legacy_rollout_v1 and self.generate_rollout is not None:
             await maybe_await(self.generate_rollout.dispose())
