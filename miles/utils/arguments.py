@@ -578,6 +578,11 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Recompute native TP log-probability chunks in backward instead of retaining their softmax tensors.",
             )
             parser.add_argument(
+                "--pack-response-logits",
+                action="store_true",
+                help="Gather CP1 response rows once before the native TP loss, avoiding full-logit slice gradients.",
+            )
+            parser.add_argument(
                 "--indep-dp",
                 action="store_true",
                 default=False,

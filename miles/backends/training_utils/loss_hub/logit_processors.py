@@ -241,6 +241,43 @@ def get_log_probs_and_entropy(
         max_seq_lens=max_seq_lens,
         include_response_indices=rollout_sampling_mask is not None,
     )
+    if getattr(args, "pack_response_logits", False):
+        if parallel_state.cp.size != 1 or args.true_on_policy_mode or rollout_sampling_mask is not None:
+            raise ValueError("Response packing requires CP1, native TP loss, and no sampling support mask")
+        if not logits.is_contiguous():
+            raise ValueError("Response packing requires contiguous logits")
+        chunks = list(response_chunks)
+        if not chunks:
+            return {"log_probs": [], **({"entropy": []} if with_entropy else {})}
+        width = logits.size(-1)
+        indices = [
+            torch.arange(
+                (chunk.storage_offset() - logits.storage_offset()) // width,
+                (chunk.storage_offset() - logits.storage_offset()) // width + chunk.size(0),
+                device=logits.device,
+                dtype=torch.long,
+            )
+            for chunk, _, _ in chunks
+        ]
+        lengths = [tokens.numel() for _, tokens, _ in chunks]
+        packed = logits.view(-1, width).index_select(0, torch.cat(indices))
+        tokens = torch.cat([tokens for _, tokens, _ in chunks])
+        log_prob, entropy = calculate_log_probs_and_entropy(
+            packed,
+            tokens,
+            parallel_state.tp.group,
+            with_entropy=with_entropy,
+            entropy_requires_grad=entropy_requires_grad,
+            chunk_size=args.log_probs_chunk_size,
+            true_on_policy=False,
+            vocab_size=getattr(args, "vocab_size", None),
+            temperature=args.rollout_temperature,
+            recompute=getattr(args, "recompute_log_probs", False),
+        )
+        result = {"log_probs": list(log_prob.squeeze(-1).split(lengths))}
+        if with_entropy:
+            result["entropy"] = list(entropy.split(lengths))
+        return result
     for sample_index, (logits_chunk, tokens_chunk, response_indices) in enumerate(response_chunks):
         sampling_mask = None
         if rollout_sampling_mask is not None:
