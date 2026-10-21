@@ -965,6 +965,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-reuse-conversion-tasks",
+                action="store_true",
+                help=(
+                    "Megatron-Bridge export: build the conversion tasks once and reuse them while every rank's "
+                    "model structure is unchanged, so their mappings keep the pipeline tensor-spec and object "
+                    "caches and later syncs skip those object collectives."
+                ),
+            )
+            parser.add_argument(
                 "--update-weights-interval",
                 type=int,
                 default=1,

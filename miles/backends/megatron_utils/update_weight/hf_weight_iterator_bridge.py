@@ -2,11 +2,16 @@ import dataclasses
 import inspect
 import itertools
 
+import torch
+import torch.distributed as dist
+
 from miles.backends.megatron_utils.update_weight.hf_weight_iterator import (
     MegatronHfWeightIteratorBase,
     _iter_mm_tower_units,
 )
+from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils import megatron_bridge_utils
+from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.lora.utils import is_lora_weight_name
 
 from ..megatron_to_hf import postprocess_hf_param
@@ -21,11 +26,12 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
         from megatron.bridge import AutoBridge
 
         self._bridge = AutoBridge.from_hf_pretrained(self.args.hf_checkpoint, trust_remote_code=True)
+        self._reused_tasks = None  # (structure, tasks) while --update-weight-reuse-conversion-tasks holds them
 
     def _iter_hf_param_units(self, weights, *, materialize):
         renamed_megatron_local_weights = {strip_param_name_prefix(k): v for k, v in weights.items()}
         with megatron_bridge_utils.patch_megatron_model(self.model):
-            conversion_tasks = self._bridge.get_conversion_tasks(self.model)
+            conversion_tasks = self._conversion_tasks()
             conversion_tasks = _process_conversion_tasks(conversion_tasks, renamed_megatron_local_weights)
             named_weights = self._bridge.export_hf_weights(
                 self.model,
@@ -52,6 +58,23 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
                 if unit:
                     yield unit
         yield from _iter_mm_tower_units(self.args, materialize=materialize)
+
+    def _conversion_tasks(self):
+        """The bridge's conversion tasks, built once and reused while every rank's model structure holds.
+
+        Their resolved mappings keep the pipeline tensor-spec and object caches that a fresh build empties, so later
+        syncs skip those object collectives; each sync still exports the current weights, which
+        ``_process_conversion_tasks`` substitutes. Whether to rebuild is decided by all ranks together: one rank
+        reusing cached mappings while another rebuilds would issue different collectives.
+        """
+        if not self.args.update_weight_reuse_conversion_tasks:
+            return self._bridge.get_conversion_tasks(self.model)
+        structure = _model_structure(self.model)
+        stale = torch.tensor([int(self._reused_tasks is None or self._reused_tasks[0] != structure)])
+        dist.all_reduce(stale, op=dist.ReduceOp.MAX, group=get_gloo_group())
+        if stale.item():
+            self._reused_tasks = (structure, self._bridge.get_conversion_tasks(self.model))
+        return self._reused_tasks[1]
 
     def _export_pp_local_lora(self, adapter):
         if adapter is None:
@@ -121,6 +144,18 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
                     yield q_hf_name, q_weight, megatron_param_names
             else:
                 yield hf_name, weight, megatron_param_names
+
+
+def _model_structure(model) -> tuple:
+    """What reused conversion tasks depend on: each parameter's identity, name, shape and dtype, and the process
+    groups their mappings were bound to."""
+    parameters = tuple(
+        (index, name, id(param), tuple(param.shape), str(param.dtype))
+        for index, chunk in enumerate(model)
+        for name, param in chunk.named_parameters()
+    )
+    state = get_parallel_state()
+    return parameters, tuple(id(info.group) for info in (state.pp, state.tp, state.ep, state.etp))
 
 
 def _process_conversion_tasks(vanilla_conversion_tasks, new_weight_dict):
