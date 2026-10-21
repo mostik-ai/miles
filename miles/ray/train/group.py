@@ -407,6 +407,19 @@ class TrainerController:
         once the update released the inference controller's lock, because killing a cell takes that lock."""
         await self._test_action_executor.run_after_update(rollout_id)
 
+    async def configure_weight_update(self, overrides: dict) -> None:
+        """Set weight-update arguments on every alive cell's ranks (a refresh-bench arm); the next sync reconnects."""
+        await self._execute_on_alive_ranks("configure_weight_update", overrides=overrides)
+
+    async def negate_weights(self) -> None:
+        """Negate the weights on every alive cell's ranks (a refresh bench, between refreshes)."""
+        await self._execute_on_alive_ranks("negate_weights")
+
+    async def _execute_on_alive_ranks(self, fn_name: str, **kwargs) -> None:
+        """A refresh-bench call on every rank of every alive cell; a failure raises without killing the cell."""
+        cells = [cell for cell in self._cells if cell.is_alive]
+        await asyncio.gather(*[cell.execute(fn_name, kill_on_failure=False, **kwargs) for cell in cells])
+
     async def get_deployment_identity(self) -> DeploymentIdentity:
         return self._deployment_identity
 
