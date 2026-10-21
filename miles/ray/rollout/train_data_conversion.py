@@ -1,6 +1,7 @@
 import logging
 from typing import Any
 
+import numpy
 import torch
 
 from miles.utils import object_store
@@ -48,6 +49,12 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
 }
+
+
+def _compact(routes):
+    if routes.size and routes.min() >= 0 and routes.max() <= 255:
+        return routes.astype(numpy.uint8)
+    return routes
 
 
 def convert_samples_to_train_data(
@@ -135,7 +142,9 @@ def convert_samples_to_train_data(
         train_data["rollout_sampling_mask_offsets"] = sampling_mask_offsets
 
     if samples[0].rollout_routed_experts is not None:
-        train_data["rollout_routed_experts"] = [sample.rollout_routed_experts for sample in samples]
+        # Expert ids travel to every trainer rank and dominate the batch. A byte holds them exactly when every id
+        # lies in [0, 255]; anything else (padding, larger models) keeps its original width.
+        train_data["rollout_routed_experts"] = [_compact(sample.rollout_routed_experts) for sample in samples]
     elif getattr(args, "use_rollout_routing_replay", False):
         raise ValueError(
             "--use-rollout-routing-replay is set but the rollout samples carry no "
