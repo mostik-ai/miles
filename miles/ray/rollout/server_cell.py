@@ -1,6 +1,7 @@
 import asyncio
 import dataclasses
 import logging
+import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -22,6 +23,7 @@ from miles.ray.rollout.cell_state import (
     StateUninitialized,
 )
 from miles.ray.rollout.engine_env_reporter import EngineEnvReporter
+from miles.utils.audit_utils.checksum_utils import InferenceEngineChecksums, flatten_inference_engine_checksums
 from miles.utils.ft_utils.api_server.models import CellCondition, CellStatus, TriState
 from miles.utils.ft_utils.health_checker import (
     ActiveAndEpoch,
@@ -64,6 +66,8 @@ class ServerCell:
     _health_checker: BaseHealthChecker = dataclasses.field(init=False)
     _env_reporter: EngineEnvReporter = dataclasses.field(init=False)
     _state: CellState = dataclasses.field(default_factory=StateUninitialized)
+    # The checksums an engine that started from dummy weights held before any update: none may survive an update.
+    dummy_checksums: InferenceEngineChecksums | None = dataclasses.field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._env_reporter = EngineEnvReporter(interval_seconds=self.args.env_report_interval_seconds)
@@ -194,6 +198,10 @@ class ServerCell:
         if not await probe_server_healthy(server_url=addr_info.server_url, api_key=self.meta.sglang_api_key):
             return
 
+        if self.meta.update_weights and loads_dummy_weights(self.args):
+            body = await self.check_weights(action="checksum", allow_quant_error=False, selector="all", skip_list=None)
+            self.dummy_checksums = flatten_inference_engine_checksums([body])[0]
+
         if self.args.check_weight_update_equal and self.meta.update_weights:
             await self.check_weights(action="snapshot", allow_quant_error=False, selector="all", skip_list=None)
 
@@ -310,6 +318,11 @@ class ServerCell:
         return await self.api_client.check_weights(
             action=action, allow_quant_error=allow_quant_error, selector=selector, skip_list=skip_list
         )
+
+
+def loads_dummy_weights(args: Any) -> bool:
+    """Whether engines start from SGLang's random dummy weights: the recipe's load format, or Miles' override."""
+    return args.sglang_load_format == "dummy" or os.environ.get("MILES_SGLANG_DUMMY_LOAD") == "1"
 
 
 def compute_nodes_per_engine(*, num_gpus_per_engine: int, num_gpus_per_node: int) -> int:

@@ -1,8 +1,10 @@
 import asyncio
+import json
 import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sglang.srt.constants import GPU_MEMORY_TYPE_CUDA_GRAPH, GPU_MEMORY_TYPE_KV_CACHE, GPU_MEMORY_TYPE_WEIGHTS
@@ -71,6 +73,9 @@ class InferenceController:
         # snapshot's receipt. Engine lifecycle needs the Miles router, whose engine states it drives.
         self.serving_version: str | None = None
         self.expected_checksums: dict[str, InferenceEngineChecksums] = {}
+        # The map the first completed update must produce (--expected-initial-weight-checksums), whatever its version:
+        # a failed transfer still advances the trainer's version counter.
+        self.initial_checksums = _initial_checksums(args.expected_initial_weight_checksums)
         self._router_cursor = 0
         self._http = GeneralHttpClientProvider.client
         self._restarts: dict[str, tuple[int, float]] = {}  # cell id -> (attempts, earliest next attempt)
@@ -289,10 +294,15 @@ class InferenceController:
         if version is None or not self.args.use_miles_router:
             await asyncio.gather(*[cell.mark_weights_ready() for cell in cells if cell.is_pending_weights])
             return None
-        self.serving_version = str(version)
+        first, self.serving_version = self.serving_version is None, str(version)
+        if first and self.initial_checksums is not None:
+            self.expected_checksums.setdefault(self.serving_version, self.initial_checksums)
         states = await self._router_states(srv)
         entering = [c.server_url for c in cells if c.is_pending_weights or _router_failed(states, c.server_url)]
-        return await self._verify(srv, cells, entering) if entering else None
+        checksums = await self._verify(srv, cells, entering) if entering else None
+        if first and not any(cell.is_serving for cell in srv.weight_update_cells):
+            raise RuntimeError(f"No engine's weights verified after the first weight update (version {version})")
+        return checksums
 
     @with_lock
     async def audit_weights(self, version: int | None, model_id: str | None = None) -> list[InferenceEngineChecksums]:
@@ -316,8 +326,9 @@ class InferenceController:
         observed = await admission.observe(self._http(), urls)
         expected = self.expected_checksums.get(self.serving_version)
         trusted = [url for url in urls if url not in entering]
-        verdicts = admission.judge(observed, self.serving_version, trusted, expected)
-        if admission.CHECKSUM_MISMATCH in verdicts.values():
+        dummy = {cell.server_url: cell.dummy_checksums for cell in cells if cell.dummy_checksums is not None}
+        verdicts = admission.judge(observed, self.serving_version, trusted, expected, dummy)
+        if {admission.CHECKSUM_MISMATCH, admission.DUMMY_WEIGHTS} & set(verdicts.values()):
             logger.error(f"Engine weights disagree at version {self.serving_version}: {verdicts}")
         for cell in cells:
             await self._settle(srv, cell, verdicts[cell.server_url], cell.server_url in entering, expected is not None)
@@ -337,7 +348,9 @@ class InferenceController:
             await admission.readmit_worker(self._http(), srv.router_url, cell.server_url)
         elif verdict == admission.VERIFIED and entering:
             await admission.readmit_worker(self._http(), srv.router_url, cell.server_url)
-        elif verdict in (admission.STALE_VERSION, admission.CHECKSUM_MISMATCH) and cell.is_serving:
+        elif cell.is_serving and verdict in (
+            admission.STALE_VERSION, admission.CHECKSUM_MISMATCH, admission.DUMMY_WEIGHTS
+        ):
             if entering or explicit or verdict == admission.STALE_VERSION:
                 await cell.demote()
 
@@ -543,6 +556,15 @@ class InferenceController:
     async def _health_monitoring_resume(self, model_id: str | None) -> None:
         for srv in self._get_servers_of_model_id(model_id):
             srv.health_checker_activeness.bump_active(True)
+
+
+def _initial_checksums(path: str | None) -> InferenceEngineChecksums | None:
+    if path is None:
+        return None
+    checksums = json.loads(Path(path).read_text())
+    if not isinstance(checksums, dict) or not checksums or not all(isinstance(v, str) for v in checksums.values()):
+        raise ValueError(f"{path} is not a checksum map of 'rank<r>/<tensor>' names")
+    return checksums
 
 
 def _router_failed(states: dict[str, dict], url: str) -> bool:

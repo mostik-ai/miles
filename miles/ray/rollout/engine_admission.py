@@ -7,7 +7,9 @@ The proof is the engine's reported weight version and its per-tensor checksum ma
 2. otherwise the map the trusted engines (those already serving the version) agree on;
 3. otherwise, with no trusted engine, the map every candidate agrees on.
 
-Without a reference nobody is admitted: two engines that disagree cannot tell which of them is wrong.
+Without a reference nobody is admitted: two engines that disagree cannot tell which of them is wrong. An engine that
+started from dummy weights is also refused while any tensor still holds its dummy checksum: engines that start alike
+agree on a tensor the update never wrote.
 This module also speaks the Miles router's engine-state API (pause, resume, readmit, states).
 """
 
@@ -23,6 +25,7 @@ STALE_VERSION = "stale_version"
 CHECKSUM_MISMATCH = "checksum_mismatch"
 UNREACHABLE = "unreachable"  # the connection was refused: the engine's process is gone
 UNANSWERED = "unanswered"  # a timeout or an error reply: no proof either way
+DUMMY_WEIGHTS = "dummy_weights"  # a tensor still holds the value the engine's dummy load gave it
 
 ROUTER_TIMEOUT_SECONDS = 30.0
 PROBE_TIMEOUT_SECONDS = 5.0
@@ -109,8 +112,10 @@ def judge(
     version: str | None,
     trusted: Sequence[str],
     expected: InferenceEngineChecksums | None = None,
+    dummy: dict[str, InferenceEngineChecksums] | None = None,
 ) -> dict[str, str]:
-    """A verdict per observed engine; a None version accepts whatever version the engine reports."""
+    """A verdict per observed engine; a None version accepts whatever version the engine reports. ``dummy`` maps an
+    engine that started from dummy weights to the checksums it held then."""
     reference = reference_checksums(observed, version, trusted, expected)
     verdicts = {}
     for url, result in observed.items():
@@ -118,6 +123,8 @@ def judge(
             verdicts[url] = UNREACHABLE if isinstance(result, httpx.ConnectError) else UNANSWERED
         elif not _current(result, version):
             verdicts[url] = STALE_VERSION
+        elif any(result[1].get(name) == held for name, held in (dummy or {}).get(url, {}).items()):
+            verdicts[url] = DUMMY_WEIGHTS
         else:
             verdicts[url] = VERIFIED if reference is not None and result[1] == reference else CHECKSUM_MISMATCH
     return verdicts

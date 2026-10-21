@@ -2048,6 +2048,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Relaunch a rollout engine found dead, without enabling fault tolerance; its replacement joins "
                 "the next weight update once started and serves after its weights verify. Needs the Miles router.",
             )
+            parser.add_argument(
+                "--expected-initial-weight-checksums",
+                type=str,
+                default=None,
+                help="A JSON checksum map ({'rank<r>/<tensor>': checksum}, as the weights checker reports it) that "
+                "every engine must serve after this job's first completed weight update, such as the map the parent "
+                "checkpoint's weights produced. It replaces agreement between engines as that update's reference. "
+                "Needs the Miles router.",
+            )
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
@@ -3751,6 +3760,7 @@ def miles_validate_args(args):
     if args.debug_train_only:
         args.rollout_num_gpus = 0
     args.starts_inference_engines = not args.debug_train_only or args.eval_num_gpus > 0
+    validate_initial_weights(args)
 
     if args.use_critic and not args.debug_rollout_only:
         if args.offload_train is None:
@@ -4023,6 +4033,24 @@ def miles_validate_args(args):
         raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
 
     _validate_deploy_component(args)
+
+
+def validate_initial_weights(args) -> None:
+    """Engines that start from SGLang's random dummy weights serve only once a weight update has filled them and
+    engine admission has verified them, which needs the Miles router; nothing may serve or snapshot them before."""
+    if args.expected_initial_weight_checksums is not None:
+        assert args.use_miles_router, "Engine admission judges --expected-initial-weight-checksums: --use-miles-router"
+        assert os.path.isfile(args.expected_initial_weight_checksums), args.expected_initial_weight_checksums
+    dummy = args.sglang_load_format == "dummy" or os.environ.get("MILES_SGLANG_DUMMY_LOAD") == "1"
+    if not dummy or not args.starts_inference_engines:
+        return
+    assert args.use_miles_router, "Dummy-weight engines serve only once their weights verify: --use-miles-router"
+    assert not args.debug_rollout_only, "--debug-rollout-only never updates weights, so it would serve dummy weights"
+    assert not args.debug_skip_weight_update, "--debug-skip-weight-update would admit dummy-weight engines unverified"
+    assert not args.check_weight_update_equal, (
+        "--check-weight-update-equal compares updated weights with the engine's initial ones, which dummy loading "
+        "makes random"
+    )
 
 
 def validate_skip_actor_forward_only(args) -> None:
