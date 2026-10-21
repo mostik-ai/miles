@@ -574,6 +574,11 @@ def train_one_step(
     disable_optimizer = args.debug_disable_optimizer or optimizer is None
     _zero_grads(model, optimizer, disable_optimizer)
 
+    if args.async_save:
+        from megatron.training.async_utils import maybe_finalize_async_save
+
+        maybe_finalize_async_save(blocking=False)
+
     if args.custom_megatron_before_train_step_hook_path:
         from miles.utils.function_registry import load_function
 
