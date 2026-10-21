@@ -3384,13 +3384,63 @@ def _resolve_run_uuid(args: argparse.Namespace) -> str:
     return generate_run_uuid()
 
 
+def _custom_config_kind(value) -> type:
+    """The kind argparse would have to produce for ``value``; every number counts as one kind."""
+    if isinstance(value, bool):
+        return bool
+    return float if isinstance(value, int | float) else type(value)
+
+
+def _apply_custom_config(args) -> None:
+    """Fold ``--custom-config-path`` into ``args``, refusing every key it is not the owner of.
+
+    The file is read after parsing and assigns untyped, so a key the command line also names would
+    replace a parsed value with no record of it, and a key whose value argparse would have converted
+    would reach the run as the wrong type.
+    """
+    from miles.utils.cli_dest_utils import dests_on_command_line
+
+    data = yaml.safe_load(resolve_file_arg(args.custom_config_path)) or {}
+    named = dests_on_command_line()
+    assert "train_backend" not in data, (
+        "--custom-config-path sets train_backend, but the backend's own parser, defaults and validator "
+        "already ran from --train-backend; pass --train-backend instead"
+    )
+    for key, value in data.items():
+        if hasattr(args, key):
+            current = getattr(args, key)
+            assert key not in named or value == current, (
+                f"--custom-config-path sets {key}={value!r} while the command line sets it to {current!r}; "
+                f"only one of the two can own that value"
+            )
+            assert current is None or _custom_config_kind(current) is _custom_config_kind(value), (
+                f"--custom-config-path sets {key}={value!r}, not the {type(current).__name__} the parser "
+                f"produced for it ({current!r}); values in that file are never converted"
+            )
+            logger.info(f"Argument {key} is already set to {current}, will override with {value}.")
+        setattr(args, key, value)
+
+
+def _fixed_chat_template_kwargs(user_kwargs: dict | None, resolved_kwargs: dict, tito_model) -> dict:
+    """``--apply-chat-template-kwargs`` under the fixed contract of a named ``--tito-model``.
+
+    Raises:
+        ValueError: a user kwarg asks for something other than what the family fixed, which used to
+            be overwritten silently and change how the history is serialised.
+    """
+    user_kwargs = dict(user_kwargs or {})
+    disputed = {key: value for key, value in resolved_kwargs.items() if user_kwargs.get(key, value) != value}
+    if disputed:
+        raise ValueError(
+            f"--apply-chat-template-kwargs sets {({key: user_kwargs[key] for key in disputed})}, but "
+            f"--tito-model={tito_model.value} fixes those keys as {disputed}; the family owns them"
+        )
+    return user_kwargs | resolved_kwargs
+
+
 def miles_validate_args(args):
     if args.custom_config_path:
-        data = yaml.safe_load(resolve_file_arg(args.custom_config_path)) or {}
-        for k, v in data.items():
-            if hasattr(args, k):
-                logger.info(f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}.")
-            setattr(args, k, v)
+        _apply_custom_config(args)
 
     validate_dashboard_args(args)
 
@@ -3536,9 +3586,9 @@ def miles_validate_args(args):
         resolved_path, resolved_kwargs = resolve_fixed_chat_template(tito_model)
         if resolved_path is not None:
             args.chat_template_path = resolved_path
-        user_kwargs = dict(args.apply_chat_template_kwargs or {})
-        user_kwargs.update(resolved_kwargs)
-        args.apply_chat_template_kwargs = user_kwargs
+        args.apply_chat_template_kwargs = _fixed_chat_template_kwargs(
+            args.apply_chat_template_kwargs, resolved_kwargs, tito_model
+        )
 
     if args.chat_template_path is not None:
         if not os.path.isfile(args.chat_template_path):
