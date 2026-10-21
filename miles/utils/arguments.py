@@ -2075,6 +2075,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
         # debug
         def add_debug_arguments(parser):
             parser.add_argument(
+                "--async-debug-dumps",
+                action="store_true",
+                default=False,
+                help="Write one owned rollout snapshot in the background; drain at checkpoint and shutdown.",
+            )
+            parser.add_argument(
                 "--save-debug-rollout-data",
                 type=str,
                 default=None,

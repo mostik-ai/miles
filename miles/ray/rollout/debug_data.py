@@ -1,6 +1,8 @@
+import copy
 import json
 import logging
 from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from string import Formatter
 
@@ -9,6 +11,39 @@ import torch
 from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
+
+
+class RolloutDumpWriter:
+    def __init__(self, args):
+        self.args = copy.copy(args)
+        self.pool = (
+            ThreadPoolExecutor(max_workers=1, thread_name_prefix="rollout-dump")
+            if getattr(args, "async_debug_dumps", False) and args.save_debug_rollout_data is not None
+            else None
+        )
+        self.pending = None
+
+    def save(self, data, rollout_id, evaluation, metadata=None, trainer_model_id=None):
+        if self.pool is None:
+            save_debug_rollout_data(self.args, data, rollout_id, evaluation, metadata, trainer_model_id)
+            return
+        self.flush()
+        data, metadata = copy.deepcopy((data, metadata))
+        self.pending = self.pool.submit(
+            save_debug_rollout_data, self.args, data, rollout_id, evaluation, metadata, trainer_model_id
+        )
+
+    def flush(self):
+        if self.pending is not None:
+            self.pending.result()
+            self.pending = None
+
+    def close(self):
+        try:
+            self.flush()
+        finally:
+            if self.pool is not None:
+                self.pool.shutdown(wait=True)
 
 
 def trajectory_rows(samples: list[Sample]) -> list[dict]:
@@ -130,7 +165,12 @@ def save_debug_rollout_data(
 
         # TODO may improve the format
         dump_data = dict(samples=[sample.to_dict() for sample in samples])
-        torch.save(dict(rollout_id=rollout_id, metadata=metadata or {}, **dump_data), path)
+        temporary = path.with_suffix(path.suffix + ".tmp")
+        try:
+            torch.save(dict(rollout_id=rollout_id, metadata=metadata or {}, **dump_data), temporary, pickle_protocol=5)
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def _format_dump_path(path_template: str, *, stem: str) -> Path:

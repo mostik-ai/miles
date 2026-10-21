@@ -6,7 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from miles.dashboard import hooks as dashboard_hooks
-from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, load_debug_rollout_data, save_debug_rollout_data
+from miles.ray.rollout.debug_data import RolloutDataInjectionUtil, RolloutDumpWriter, load_debug_rollout_data
 from miles.ray.rollout.eval_fleet import EvalFleetInfo, RolloutExecutorEvalFleet
 from miles.ray.rollout.metrics import log_eval_rollout_data, log_eval_skip, log_rollout_data
 from miles.ray.rollout.rollout_data_conversion import postprocess_rollout_data
@@ -66,6 +66,7 @@ class RolloutExecutor:
         configure_logger(args, source=SimpleProcessIdentity(component="rollout_executor"))
 
         self.args = args
+        self._dump_writer = RolloutDumpWriter(args)
         # set by the training actor after each weight update, keyed by trainer model id (None for one policy)
         self._weight_versions_of_model_id: dict[str | None, int] = {}
         self._rollouts_since_publish_of_model_id: dict[str | None, int] = defaultdict(int)
@@ -129,6 +130,7 @@ class RolloutExecutor:
     # -------------------------- lifecycle -----------------------------
 
     async def dispose(self) -> None:
+        self._dump_writer.close()
         if not self.use_legacy_rollout_v1 and self.generate_rollout is not None:
             await maybe_await(self.generate_rollout.dispose())
         if (close := getattr(self.data_source, "close", None)) is not None:
@@ -155,13 +157,8 @@ class RolloutExecutor:
             data, metadata, metrics = await self._get_rollout_data(
                 rollout_id=rollout_id, trainer_model_id=trainer_model_id
             )
-        save_debug_rollout_data(
-            self.args,
-            data,
-            rollout_id=rollout_id,
-            evaluation=False,
-            metadata=metadata,
-            trainer_model_id=trainer_model_id,
+        self._dump_writer.save(
+            data, rollout_id=rollout_id, evaluation=False, metadata=metadata, trainer_model_id=trainer_model_id
         )
         log_rollout_data(
             rollout_id, self.args, data, metrics, time.time() - start_time, trainer_model_id=trainer_model_id
@@ -210,7 +207,7 @@ class RolloutExecutor:
                     evaluation=True,
                 )
         data = result.data
-        save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=True)
+        self._dump_writer.save(data, rollout_id=rollout_id, evaluation=True)
         metrics = log_eval_rollout_data(rollout_id, self.args, data, result.metrics)
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
@@ -239,7 +236,7 @@ class RolloutExecutor:
                 return self.report_eval_skip(rollout_id, e.reason)
 
             data = result.data
-            save_debug_rollout_data(self.args, data, rollout_id=rollout_id, evaluation=True)
+            self._dump_writer.save(data, rollout_id=rollout_id, evaluation=True)
             extra_metrics = dict(result.metrics or {})
             extra_metrics["eval/lag_steps"] = max(self.rollout_id - rollout_id, 0)
             extra_metrics["eval/duration_seconds"] = time.time() - start_time
@@ -293,6 +290,7 @@ class RolloutExecutor:
 
     # TODO the train and eval rollout functions will become one object, so one save/load is enough here
     def save(self, rollout_id: int) -> None:
+        self._dump_writer.flush()
         self.data_source.save(rollout_id)
         if not self.use_legacy_rollout_v1:
             if self.generate_rollout is not None:
