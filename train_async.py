@@ -34,6 +34,11 @@ async def train(args, *, disposer: Disposer):
     actor_model, critic_model = await create_training_models(args, rollout_executor)
     disposer.add(critic_model, actor_model)
 
+    if args.export_hf_dir is not None:
+        # Export the restored weights and exit; `with_disposer` disposes the models and engines.
+        await actor_model.export_hf(args.start_rollout_id - 1, args.export_hf_dir)
+        return
+
     maybe_start_api_server(args, trainer_models={"actor": actor_model}, inference_controller=inference_controller)
     maybe_start_mini_ft_controller(args)
 
@@ -71,7 +76,12 @@ async def train(args, *, disposer: Disposer):
     save_cadence.start()
 
     # async train loop.
-    rollout_data_next_future = await eager_create_task(prepare_and_generate(args.start_rollout_id))
+    # An evaluation-only run (no rollouts) must not start generating a training batch.
+    rollout_data_next_future = (
+        await eager_create_task(prepare_and_generate(args.start_rollout_id))
+        if args.start_rollout_id < args.num_rollout
+        else None
+    )
     for rollout_id in range(args.start_rollout_id, args.num_rollout):
         # Sync the last generation
         if rollout_data_next_future is not None:

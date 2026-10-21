@@ -1552,6 +1552,15 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--export-hf-dir",
+                type=str,
+                default=None,
+                help=(
+                    "Export the restored checkpoint's weights to this directory as an HF checkpoint, through the "
+                    "same converters as weight updates, then exit without training."
+                ),
+            )
+            parser.add_argument(
                 "--save-interval-minutes",
                 type=float,
                 default=None,
