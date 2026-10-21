@@ -1991,6 +1991,18 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=3,
                 help="Number of consecutive failures before marking a worker as unhealthy.",
             )
+            parser.add_argument(
+                "--miles-router-health-check-timeout",
+                type=float,
+                default=5.0,
+                help="Seconds a MilesRouter health probe may take before it counts as a failure.",
+            )
+            parser.add_argument(
+                "--miles-router-pause-deadline-seconds",
+                type=float,
+                default=1800.0,
+                help="How long a worker paused for a weight update may fail health probes before they count.",
+            )
             RouterArgs.add_cli_args(parser, use_router_prefix=True, exclude_host_port=True)
             return parser
 
