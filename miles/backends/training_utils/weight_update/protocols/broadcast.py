@@ -15,7 +15,7 @@ from miles.backends.training_utils.weight_update.protocol import WeightTransferP
 from miles.backends.training_utils.weight_update.utils import get_data_replica_rank_and_size
 from miles.utils import async_utils
 from miles.utils.distributed_lock import create_world_ticket_lock
-from miles.utils.distributed_utils import init_process_group
+from miles.utils.distributed_utils import get_gloo_group, init_process_group
 
 
 class UpdateWeightFromDistributed(WeightTransferProtocol):
@@ -36,6 +36,8 @@ class UpdateWeightFromDistributed(WeightTransferProtocol):
         # by the bucket before the previous one, which has been acked.
         self._slots: list[torch.Tensor | None] = [None, None]
         self._next_slot = 0
+        # --update-weight-broadcast-relays: a sender other than rank 0, which broadcasts but drives no engine.
+        self._relay = False
         parallel_state = get_parallel_state()
         self._engine_lock: AbstractContextManager = (
             create_world_ticket_lock(
@@ -66,6 +68,12 @@ class UpdateWeightFromDistributed(WeightTransferProtocol):
         replica_rank, _ = get_data_replica_rank_and_size(parallel_state, placement)
         self.is_sender = replica_rank == 0
         shard = 0 if placement.gather_pp else parallel_state.pp.rank
+        if self._relay:  # a relay leaves its group; this connection may make it one again
+            dist.destroy_process_group(self._model_update_groups)
+            self._relay, self._model_update_groups = False, None
+        if self.args.update_weight_broadcast_relays > 1:
+            self._connect_relayed(self.args.update_weight_broadcast_relays, placement)
+            return
         if self.is_sender:
             self.group_name = f"miles-pp_{shard}"
             disconnect_rollout_engines_from_distributed(
@@ -75,31 +83,59 @@ class UpdateWeightFromDistributed(WeightTransferProtocol):
                 self.args, self.group_name, rollout_engines, engine_gpu_counts=engine_gpu_counts
             )
 
+    def _connect_relayed(self, relays: int, placement: WeightUpdatePlacement) -> None:
+        """The update group of --update-weight-broadcast-relays: the first ``relays`` ranks on global rank 0's node,
+        then the engines from rank ``relays`` on. Collective over every trainer rank."""
+        assert placement.gather_pp, "relays hold rank 0's buckets only when every rank gathers the full tensors"
+        members = relay_ranks(relays)
+        address = [update_group_address() if dist.get_rank() == 0 else None]
+        dist.broadcast_object_list(address, src=0, group=get_gloo_group())
+        self.group_name, self.is_sender = "miles-pp_0", dist.get_rank() in members
+        self._relay = self.is_sender and dist.get_rank() != 0
+        if self._relay:
+            host, port = address[0]
+            self._model_update_groups = init_process_group(
+                backend="nccl",
+                init_method=f"tcp://{host}:{port}",
+                world_size=relays + self.args.rollout_num_gpus_per_engine * len(self.rollout_engines),
+                rank=members.index(dist.get_rank()),
+                group_name=self.group_name,
+            )
+        elif self.is_sender:
+            disconnect_rollout_engines_from_distributed(
+                self.args, self.group_name, self._model_update_groups, self.rollout_engines
+            )
+            self._model_update_groups = connect_rollout_engines_from_distributed(
+                self.args, self.group_name, self.rollout_engines, relays=relays, address=address[0]
+            )
+
     def send_bucket(self, bucket: list[tuple[str, torch.Tensor]]) -> None:
         """Lock → broadcast → clear → unlock. Lock prevents NCCL deadlock.
 
         Pipelined, the bucket is posted and the call returns once the previous one is acked and released, so the
         caller exports the next bucket while this one moves; the lock is held until this one is acked. Flattened, the
         bucket is packed into a slot, even before the previous bucket's acks (its slot is the other one), and its own
-        tensors are dropped once posted; the slot is what stays in flight.
+        tensors are dropped once posted; the slot is what stays in flight. A relay posts the same broadcasts with no
+        engine RPC and no lock.
         """
         flat = self._pack(bucket) if self.args.update_weight_flattened else None
+        engines, lock = ([], nullcontext()) if self._relay else (self.rollout_engines, self._engine_lock)
         if self.args.update_weight_pipelined:
             self._release_in_flight()
             with ExitStack() as held:
-                held.enter_context(self._engine_lock)
+                held.enter_context(lock)
                 posted = post_weights_from_distributed(
-                    self.group_name, self._model_update_groups, self.rollout_engines, bucket, self._selector, flat
+                    self.group_name, self._model_update_groups, engines, bucket, self._selector, flat
                 )
                 if flat is not None:
                     bucket.clear()
                 self._in_flight = (bucket, *posted, held.pop_all())  # the lock stays held until the acks
             return
-        with self._engine_lock:
+        with lock:
             futures = update_weights_from_distributed(
                 self.group_name,
                 self._model_update_groups,
-                self.rollout_engines,
+                engines,
                 bucket,
                 selector=self._selector,
                 flat=flat,
@@ -158,24 +194,24 @@ def connect_rollout_engines_from_distributed(
     group_name: str,
     rollout_engines: Sequence[SGLangApiClient],
     engine_gpu_counts: Sequence[int] | None = None,
+    relays: int = 1,
+    address: tuple[str, int] | None = None,
 ) -> dist.ProcessGroup:
     """
     Create NCCL group: training rank 0 + all engine GPUs. Blocks until joined.
 
     ``engine_gpu_counts`` gives the number of GPUs per engine.  When engines
     have heterogeneous TP sizes (e.g. prefill TP=2, decode TP=4), each engine
-    occupies a different number of ranks in the NCCL group.
+    occupies a different number of ranks in the NCCL group. With ``relays``,
+    ranks 1..relays-1 are relays joining at ``address`` and the engines follow.
     """
     if engine_gpu_counts is None:
         engine_gpu_counts = [args.rollout_num_gpus_per_engine] * len(rollout_engines)
-    master_address = ray._private.services.get_node_ip_address()
-    with socket.socket() as sock:
-        sock.bind(("", 0))
-        master_port = sock.getsockname()[1]
-    world_size = sum(engine_gpu_counts) + 1
+    master_address, master_port = address or update_group_address()
+    world_size = sum(engine_gpu_counts) + relays
 
     futures = []
-    rank_cursor = 1
+    rank_cursor = relays
     for i, api_client in enumerate(rollout_engines):
         futures.append(
             async_utils.submit(
@@ -199,6 +235,23 @@ def connect_rollout_engines_from_distributed(
     )
     async_utils.wait_futures(futures)
     return model_update_groups
+
+
+def update_group_address() -> tuple[str, int]:
+    """This node's address and a free port for an update group's rendezvous."""
+    with socket.socket() as sock:
+        sock.bind(("", 0))
+        return ray._private.services.get_node_ip_address(), sock.getsockname()[1]
+
+
+def relay_ranks(count: int) -> list[int]:
+    """The ``count`` lowest global ranks on global rank 0's node, rank 0 first. Collective over the gloo group."""
+    nodes = [None] * dist.get_world_size()
+    dist.all_gather_object(nodes, ray._private.services.get_node_ip_address(), group=get_gloo_group())
+    members = [rank for rank, node in enumerate(nodes) if node == nodes[0]][:count]
+    if len(members) < count:
+        raise ValueError(f"{count} broadcast relays asked for, but only {len(members)} ranks share rank 0's node")
+    return members
 
 
 def disconnect_rollout_engines_from_distributed(args, group_name, model_update_groups, rollout_engines):

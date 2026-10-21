@@ -984,6 +984,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--update-weight-broadcast-relays",
+                type=int,
+                default=1,
+                help=(
+                    "Broadcast protocol under a gathered placement: the update group is this many ranks on global "
+                    "rank 0's node, then the engines. Rank 0 stays the root and alone drives the engines; the others "
+                    "broadcast the same buckets, so NCCL can leave the node through their NICs too. 1: rank 0 alone."
+                ),
+            )
+            parser.add_argument(
                 "--update-weight-reuse-conversion-tasks",
                 action="store_true",
                 help=(
