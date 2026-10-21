@@ -68,6 +68,7 @@ class ServerCell:
     _state: CellState = dataclasses.field(default_factory=StateUninitialized)
     # The checksums an engine that started from dummy weights held before any update: none may survive an update.
     dummy_checksums: InferenceEngineChecksums | None = dataclasses.field(default=None, init=False)
+    _snapshot_task: asyncio.Task | None = dataclasses.field(default=None, init=False)
 
     def __post_init__(self) -> None:
         self._env_reporter = EngineEnvReporter(interval_seconds=self.args.env_report_interval_seconds)
@@ -203,7 +204,7 @@ class ServerCell:
             self.dummy_checksums = flatten_inference_engine_checksums([body])[0]
 
         if self.args.check_weight_update_equal and self.meta.update_weights:
-            await self.check_weights(action="snapshot", allow_quant_error=False, selector="all", skip_list=None)
+            await self._snapshot_weights_once()
 
         if self.meta.needs_offload:
             api_client = SGLangApiClient(server_url=addr_info.server_url)
@@ -226,6 +227,30 @@ class ServerCell:
 
         if serve_without_weight_update:
             self._mark_serving()
+
+    async def _snapshot_weights_once(self) -> None:
+        """Take the weight-checker baseline in a task of its own, and wait for that one task.
+
+        ``InferenceController._tick_cells`` bounds every tick with ``CELL_TICK_TIMEOUT_SECONDS``.
+        A 309B model's snapshot copies every engine weight into a fresh CPU arena and takes
+        minutes, so awaiting it inside the tick cancels it at the bound and the next tick starts
+        another one: the cell never leaves initializing and each attempt leaves an arena behind.
+        The task survives the cancelled tick, so the engine is asked exactly once however long it
+        takes; a later tick waits on that same task and carries on from its result. A snapshot
+        that *fails* is dropped, so a later tick retries it as it did before.
+        """
+        if self._snapshot_task is None:
+            self._snapshot_task = asyncio.create_task(
+                self.check_weights(action="snapshot", allow_quant_error=False, selector="all", skip_list=None)
+            )
+        try:
+            await asyncio.shield(self._snapshot_task)
+        except BaseException:
+            # This tick being cancelled at its bound leaves the task running; only a snapshot that
+            # finished badly is dropped, so that a later tick issues a new one.
+            if self._snapshot_task.done() and self._snapshot_task.exception() is not None:
+                self._snapshot_task = None
+            raise
 
     async def mark_weights_ready(self) -> None:
         assert isinstance(self._state, StatePendingWeights), f"{self._state=}"
