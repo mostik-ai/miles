@@ -2363,6 +2363,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=None,
             )
             parser.add_argument(
+                "--memory-ledger-dir",
+                type=str,
+                default=None,
+                help="Each training rank appends its GPU memory by owner here (miles/utils/memory_ledger.py).",
+            )
+            parser.add_argument(
                 "--profile-target",
                 type=str,
                 choices=["train_overall", "train_actor", "train_log_probs"],

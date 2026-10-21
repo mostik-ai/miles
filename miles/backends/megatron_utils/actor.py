@@ -24,7 +24,7 @@ from miles.dashboard import hooks as dashboard_hooks
 from miles.ray.rollout.inference_controller import UpdatableEngines
 from miles.ray.specs.train import compute_trainer_pool_id
 from miles.ray.train_actor import TrainRayActor
-from miles.utils import async_utils, object_store, train_dump_utils
+from miles.utils import async_utils, memory_ledger, object_store, train_dump_utils
 from miles.utils.argparse_utils import inplace_modify_args
 from miles.utils.audit_utils.event_logger.logger import event_logger_context
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
@@ -278,6 +278,9 @@ class MegatronTrainRayActor(TrainRayActor):
 
         if self.args.expandable_training_segments:
             torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        memory_ledger.write(
+            args, "built", load_output.loaded_rollout_id, model_chunks=self.model, optimizer=self.optimizer
+        )
         return load_output.start_rollout_id
 
     def _init_training_state(self) -> None:
@@ -816,6 +819,14 @@ class MegatronTrainRayActor(TrainRayActor):
             self.args, rollout_id=rollout_id, rollout_data=rollout_data, log=routing_replay_manager.overlap_log
         )
         routing_replay_manager.overlap_log = []
+        memory_ledger.write(
+            self.args,
+            "update",
+            rollout_id,
+            model_chunks=self.model,
+            optimizer=self.optimizer,
+            replays=[replay for m in all_replay_managers if m.enabled for replay in m.replays],
+        )
 
         for m in all_replay_managers:
             if m.enabled:
@@ -873,6 +884,7 @@ class MegatronTrainRayActor(TrainRayActor):
         finally:
             if staging:
                 torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        memory_ledger.write(self.args, "saved", rollout_id, model_chunks=self.model, optimizer=self.optimizer)
 
         if self.args.save_hf is not None and self.role == "actor":
             assert self.snapshot_publisher is not None, "HF export requires a snapshot publisher"
