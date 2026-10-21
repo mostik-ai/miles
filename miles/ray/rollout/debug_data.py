@@ -18,7 +18,9 @@ class RolloutDumpWriter:
         self.args = copy.copy(args)
         self.pool = (
             ThreadPoolExecutor(max_workers=1, thread_name_prefix="rollout-dump")
-            if getattr(args, "async_debug_dumps", False) and args.save_debug_rollout_data is not None
+            if getattr(args, "async_debug_dumps", False)
+            and args.save_debug_rollout_data is not None
+            and not getattr(args, "skip_debug_rollout_data", False)
             else None
         )
         self.pending = None
@@ -161,6 +163,8 @@ def save_debug_rollout_data(
 
         samples = [sample for info in data.values() for sample in info["samples"]] if evaluation else list(data)
         save_debug_trajectory_data(args, samples, rollout_id, evaluation, trainer_model_id=trainer_model_id)
+        if getattr(args, "skip_debug_rollout_data", False):
+            return
         save_dashboard_columns(samples, path.parent.parent / "dashboard_columns" / f"rollout_{stem}.parquet")
 
         # TODO may improve the format

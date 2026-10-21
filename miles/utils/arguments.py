@@ -2134,6 +2134,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Write one owned rollout snapshot in the background; drain at checkpoint and shutdown.",
             )
             parser.add_argument(
+                "--skip-debug-rollout-data",
+                action="store_true",
+                default=False,
+                help=(
+                    "Skip the batch dump with its tokens: copying and pickling a batch of long responses holds "
+                    "the rollout process for seconds each update, and only a replay of the step needs the batch. "
+                    "What every sample did is recorded either way, by coral's rollout-log hooks."
+                ),
+            )
+            parser.add_argument(
                 "--save-debug-rollout-data",
                 type=str,
                 default=None,
@@ -3547,7 +3557,6 @@ def miles_validate_args(args):
     if args.dump_details is not None:
         args.save_debug_rollout_data = f"{args.dump_details}/rollout_data/{{rollout_id}}.pt"
         args.save_debug_train_data = f"{args.dump_details}/train_data/{{rollout_id}}_{{rank}}.pt"
-        args.save_debug_trajectory_data = f"{args.dump_details}/trajectory/{{rollout_id}}.jsonl"
         args.save_debug_event_data = f"{args.dump_details}/{EVENTS_DIRNAME}"
 
     if args.save_debug_event_data is None and args.save is not None:
