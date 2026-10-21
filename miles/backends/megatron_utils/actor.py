@@ -193,7 +193,9 @@ class MegatronTrainRayActor(TrainRayActor):
                 m.enabled = getattr(self.args, f"use_{m.name}_replay", False)
                 m.enable_check_replay_result = m.enabled and self.args.ci_test
 
-        checkpointing_context = None
+        # One context for the process lifetime: Megatron caches its load metadata and save strategy
+        # here, so later saves skip sharding validation and planning when the structure is constant.
+        checkpointing_context = {}
         if recv_ckpt_src_rank is not None:
             ckpt_manager = recv_ckpt(
                 indep_dp=get_parallel_state().indep_dp,
@@ -206,6 +208,7 @@ class MegatronTrainRayActor(TrainRayActor):
         heal_load_overrides: dict[str, object] = (
             dict(no_load_optim=False, no_load_rng=False, finetune=False) if recv_ckpt_src_rank is not None else {}
         )
+        self._checkpointing_context = checkpointing_context
         self.model, self.optimizer, self.opt_param_scheduler = build_model_and_optimizer(args, role=role)
         self._post_init_random_state = RandomState.capture()
 
@@ -827,6 +830,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.model,
             self.optimizer,
             self.opt_param_scheduler,
+            checkpointing_context=self._checkpointing_context,
             snapshot_publisher=self.snapshot_publisher,
         )
 
