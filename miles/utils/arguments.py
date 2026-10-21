@@ -1924,6 +1924,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="Timeout for MilesRouter HTTP requests in seconds.",
             )
             parser.add_argument(
+                "--miles-router-keep-alive", type=int, default=5, help="MilesRouter HTTP keep-alive timeout in seconds."
+            )
+            parser.add_argument(
                 "--miles-router-max-connections",
                 type=int,
                 default=None,

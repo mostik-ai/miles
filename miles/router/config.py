@@ -8,6 +8,7 @@ class MilesRouterConfig(FrozenStrictBaseModel):
     timeout: float | None
     health_check_interval: float
     health_check_failure_threshold: int
+    keep_alive: int = 5
 
 
 def compute_miles_router_config(args, *, host: str, port: int, num_engines: int) -> MilesRouterConfig:
@@ -23,4 +24,5 @@ def compute_miles_router_config(args, *, host: str, port: int, num_engines: int)
         timeout=args.miles_router_timeout,
         health_check_interval=args.rollout_health_check_interval,
         health_check_failure_threshold=args.miles_router_health_check_failure_threshold,
+        keep_alive=args.miles_router_keep_alive,
     )

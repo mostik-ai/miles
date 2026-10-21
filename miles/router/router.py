@@ -30,7 +30,9 @@ def run_router(config: MilesRouterConfig):
     miles_router = MilesRouter(config, verbose=False)
 
     # Start the server
-    uvicorn.run(miles_router.app, host=config.host, port=config.port, log_level="info")
+    uvicorn.run(
+        miles_router.app, host=config.host, port=config.port, log_level="info", timeout_keep_alive=config.keep_alive
+    )
 
 
 class MilesRouter:
