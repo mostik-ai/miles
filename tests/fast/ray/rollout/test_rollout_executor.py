@@ -158,6 +158,30 @@ class TestDispose:
 
         assert disposed == ["train", "eval"]
 
+    async def test_dispose_finishes_the_trackers_once_so_the_last_eval_reaches_them(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Ray kills the executor once the job ends, so its trackers must send the final eval first."""
+        finished: list[bool] = []
+        executor = RolloutExecutor.__new__(RolloutExecutor)
+        executor._disposed = False
+        executor.use_legacy_rollout_v1 = False
+        executor.generate_rollout = None
+        executor.eval_generate_rollout = None
+        executor.data_source = object()
+        executor.args = Namespace()
+        executor._metric_checker = None
+        monkeypatch.setattr(rollout_executor_module, "finish_tracking", lambda: finished.append(True))
+        monkeypatch.setattr(rollout_executor_module.event_analyzer, "run_analysis_from_args", lambda _args: None)
+        monkeypatch.setattr(
+            rollout_executor_module.event_analyzer, "run_sample_ownership_analysis", lambda *, args: None
+        )
+
+        await executor.dispose()
+        await executor.dispose()
+
+        assert finished == [True]
+
     async def test_the_final_ownership_check_runs_before_the_run_ends(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Violations that only mature after the last get would otherwise never be checked."""
         checked: list[Namespace] = []
