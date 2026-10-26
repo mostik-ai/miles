@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 import uuid
 from argparse import Namespace
 from collections.abc import Callable
@@ -96,6 +97,7 @@ async def generate_and_rm(
                 sink.gen_start(sample)
             # per-sample override, e.g. an eval dataset naming its own generate function
             generate_fn = load_generate_function(sample.generate_function_path) or state.generate_function
+            generation_started_at = time.time()
             output = await generate_fn(
                 GenerateFnInput(
                     state=state,
@@ -105,6 +107,7 @@ async def generate_and_rm(
                 )
             )
             sample = output.samples
+            _record_generation_call(sample, started_at=generation_started_at, finished_at=time.time())
             if not evaluation:
                 stamp_sample_lineage(sample, source_sample_index=input_sample_index)
             logger.debug(f"{log_prefix} generate_function returned")
@@ -255,3 +258,9 @@ def stamp_sample_lineage(output: Sample | list[Sample], *, source_sample_index: 
         sample.lineage = SampleLineage(
             source_sample_index=source_sample_index, output_index=output_index, output_count=len(samples)
         )
+
+
+def _record_generation_call(output: Sample | list[Sample], *, started_at: float, finished_at: float) -> None:
+    samples = output if isinstance(output, list) else [output]
+    for sample in samples:
+        sample.record_generation_call(started_at=started_at, finished_at=finished_at)

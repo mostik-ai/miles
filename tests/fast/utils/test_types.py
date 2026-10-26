@@ -349,6 +349,24 @@ class TestWeightVersions:
         s.reset_for_retry()
         assert s.weight_versions == []
 
+    def test_record_generation_call_keeps_the_first_start_and_adds_up_call_seconds(self):
+        """A resumed sample keeps when its first generate call started and sums the seconds of all its calls."""
+        s = _make_sample([1, 2], [3, 4])
+
+        s.record_generation_call(started_at=100.0, finished_at=130.0)
+        s.record_generation_call(started_at=160.0, finished_at=170.0)
+
+        assert (s.generation_started_at, s.generation_finished_at, s.generation_seconds) == (100.0, 170.0, 40.0)
+
+    def test_reset_for_retry_clears_the_generation_timing(self):
+        """A retried sample is timed again from its next first generate call."""
+        s = _make_sample([1, 2], [3, 4])
+        s.record_generation_call(started_at=100.0, finished_at=130.0)
+
+        s.reset_for_retry()
+
+        assert (s.generation_started_at, s.generation_finished_at, s.generation_seconds) == (None, None, 0.0)
+
     def test_reset_for_retry_clears_the_policy_the_last_generation_stamped(self):
         """The policy id marks what a generation produced, so a retry must earn it again instead of inheriting it."""
         s = _make_sample([1, 2], [3, 4])

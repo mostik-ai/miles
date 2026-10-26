@@ -176,6 +176,7 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_versioned_tokens = 0
         self._metric_selected_samples = 0
         self._metric_selected_versioned_samples = 0
+        self._metric_fill_when_taken: float | None = None
 
     async def put(self, input: DataBufferInput) -> None:
         if not self._preput_filter(input):
@@ -231,6 +232,8 @@ class DefaultDataBuffer(DataBuffer):
                 except asyncio.TimeoutError:
                     pass
 
+            # 1.0 means put() was blocking generation when training took the batch
+            self._metric_fill_when_taken = len(self._buffer) / self._capacity
             entries = self._buffer[:num_groups]
             del self._buffer[:num_groups]
             self._cond.notify_all()  # wake producers blocked on a full buffer
@@ -305,6 +308,8 @@ class DefaultDataBuffer(DataBuffer):
             metrics[f"{prefix}token_weighted_staleness"] = (
                 self._metric_selected_token_lag_sum / self._metric_selected_versioned_tokens
             )
+        if self._metric_fill_when_taken is not None:
+            metrics[f"{prefix}buffer_fill"] = self._metric_fill_when_taken
         if self._metric_selected_samples:
             metrics[f"{prefix}weight_version_sample_coverage"] = (
                 self._metric_selected_versioned_samples / self._metric_selected_samples
@@ -325,6 +330,7 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_samples = 0
         self._metric_selected_versioned_samples = 0
         self._metric_aborted_groups = self._metric_stale_groups = 0
+        self._metric_fill_when_taken = None
         return metrics
 
 

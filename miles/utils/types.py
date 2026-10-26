@@ -226,6 +226,11 @@ class Sample:
     kv_cache_namespace: str | None = None
 
     non_generation_time: float = 0.0  # time spent in non-generation steps
+    # Wall-clock time the sample's first generate call started and its last one returned; None until generated.
+    generation_started_at: float | None = None
+    generation_finished_at: float | None = None
+    # Seconds spent in generate calls, summed over the calls of a resumed sample.
+    generation_seconds: float = 0.0
 
     @dataclass
     class SpecInfo:
@@ -466,10 +471,20 @@ class Sample:
         self.trainer_model_id = None
         self.kv_cache_namespace = None
         self.non_generation_time = 0.0
+        self.generation_started_at = None
+        self.generation_finished_at = None
+        self.generation_seconds = 0.0
         self.spec_info = Sample.SpecInfo()
         self.prefix_cache_info = Sample.PrefixCacheInfo()
         self.remove_sample = False
         self.train_metadata = None
+
+    def record_generation_call(self, *, started_at: float, finished_at: float) -> None:
+        """Add one generate call: keep the first call's start, take this call's end, and add its seconds."""
+        if self.generation_started_at is None:
+            self.generation_started_at = started_at
+        self.generation_finished_at = finished_at
+        self.generation_seconds += finished_at - started_at
 
     @property
     def all_weight_version_spans(self) -> list[WeightVersionSpan]:

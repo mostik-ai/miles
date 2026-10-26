@@ -1,4 +1,5 @@
 import logging
+import time
 from collections.abc import Callable
 from numbers import Number
 from typing import Any
@@ -85,6 +86,9 @@ def log_rollout_data(
 
     log_dict = {**(rollout_extra_metrics or {})}
     log_dict |= dict_add_prefix(_compute_metrics_from_samples(args, samples), "rollout/")
+    log_dict |= dict_add_prefix(
+        _compute_generation_time_metrics(samples, logged_at=time.time()), "rollout/generation/"
+    )
     log_dict |= dict_add_prefix(_compute_perf_metrics_from_samples(args, samples, rollout_time), "perf/")
     if args.log_passrate:
         log_dict |= dict_add_prefix(
@@ -268,6 +272,38 @@ def _compute_training_sample_metrics(args: Any, samples: list[Sample]) -> dict[s
         "num_training_samples": len(samples),
         "episode_raw_reward": sum(rollout_rewards) / len(rollout_rewards) if rollout_rewards else 0.0,
     }
+
+
+def _compute_generation_time_metrics(samples: list[Sample], *, logged_at: float) -> dict[str, float]:
+    """Wall-clock generation times of a rollout, which ``rollout_time`` does not give under ``--fully-async``.
+
+    ``batch_seconds`` runs from the first generate call of any sample to the last return; ``wait_before_training``
+    is how long finished samples waited until the rollout was logged. Empty when no sample went through a timed
+    generate call, such as rollout data loaded for debugging.
+    """
+    timed = [sample for sample in samples if sample.generation_started_at is not None]
+    if not timed:
+        return {}
+    sample_seconds = [sample.generation_seconds for sample in timed]
+    group_seconds = [_generation_span_seconds(group) for group in group_by(timed, lambda s: s.group_index).values()]
+    total_seconds = sum(sample_seconds)
+    return {
+        "batch_seconds": _generation_span_seconds(timed),
+        "sample_seconds_mean": float(np.mean(sample_seconds)),
+        "sample_seconds_max": max(sample_seconds),
+        "group_seconds_mean": float(np.mean(group_seconds)),
+        "group_seconds_max": max(group_seconds),
+        "tokens_per_second": sum(sample.response_length for sample in timed) / total_seconds if total_seconds else 0.0,
+        "wait_before_training_seconds_mean": float(
+            np.mean([logged_at - sample.generation_finished_at for sample in timed])
+        ),
+    }
+
+
+def _generation_span_seconds(samples: list[Sample]) -> float:
+    return max(sample.generation_finished_at for sample in samples) - min(
+        sample.generation_started_at for sample in samples
+    )
 
 
 def _compute_perf_metrics_from_samples(args, samples, rollout_time):

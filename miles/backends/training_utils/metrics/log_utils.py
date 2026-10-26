@@ -1,6 +1,7 @@
 import logging
 from argparse import Namespace
 from math import isclose
+from pathlib import Path
 
 import numpy as np
 import psutil
@@ -411,18 +412,40 @@ def log_multi_turn_data(rollout_id: int, args: Namespace, rollout_data: RolloutB
 
 
 def log_perf_data(rollout_id: int, args: Namespace, extra_metrics: dict | None = None) -> None:
-    parallel_state = get_parallel_state()
     perf.log_perf_data_raw(
         rollout_id=rollout_id,
         args=args,
-        is_primary_rank=(
-            parallel_state.tp.rank == 0
-            and parallel_state.is_pp_last_stage
-            and parallel_state.effective_dp_cp.rank == 0
-        ),
+        is_primary_rank=_is_perf_primary_rank(),
         compute_total_fwd_flops=lambda seq_lens: fwd_tflops_per_gpu(seq_lens, args, dist.get_world_size()),
         extra_metrics=extra_metrics,
     )
+
+
+def log_checkpoint_save(rollout_id: int, args: Namespace, *, save_seconds: float, checkpoint_dir: str | None) -> None:
+    """Log how long a save blocked training, at once rather than with the next step's perf metrics, and the size
+    of ``checkpoint_dir``; pass None while an async save is still writing it."""
+    if not _is_perf_primary_rank():
+        return
+    log_dict = {"perf/checkpoint/save_seconds": save_seconds}
+    if checkpoint_dir is not None:
+        log_dict["perf/checkpoint/size_gb"] = _directory_bytes(checkpoint_dir) / 1e9
+    logger.info(f"checkpoint {rollout_id}: {log_dict}")
+    log_dict, step_key = namespace_metrics(
+        log_dict,
+        trainer_model_id=args.trainer_model_id,
+        step_name="rollout/step",
+        step=compute_rollout_step(args, rollout_id),
+    )
+    tracking.log(args, log_dict, step_key=step_key)
+
+
+def _is_perf_primary_rank() -> bool:
+    parallel_state = get_parallel_state()
+    return parallel_state.tp.rank == 0 and parallel_state.is_pp_last_stage and parallel_state.effective_dp_cp.rank == 0
+
+
+def _directory_bytes(directory: str) -> int:
+    return sum(path.stat().st_size for path in Path(directory).rglob("*") if path.is_file())
 
 
 def log_cpu_memory(rollout_id: int, args: Namespace, label: str) -> None:

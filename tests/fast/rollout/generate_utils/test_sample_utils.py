@@ -184,6 +184,21 @@ class TestMergeSamples:
 
         assert merged.trainer_model_id == "policy-a"
 
+    def test_merge_times_the_turns_from_the_first_call_to_the_last(self, mock_tokenizer: MagicMock) -> None:
+        """A merged trajectory starts with its first turn's generate call, ends with its last, and sums their seconds."""
+        a = make_sample(tokens=[1, 2, 10], response_length=1, loss_mask=[1])
+        b = make_sample(tokens=[1, 2, 10, 20, 30], response_length=1, loss_mask=[1])
+        a.record_generation_call(started_at=100.0, finished_at=110.0)
+        b.record_generation_call(started_at=120.0, finished_at=150.0)
+
+        merged = _merge_sample_pair(a=a, b=b, tokenizer=mock_tokenizer)
+
+        assert (merged.generation_started_at, merged.generation_finished_at, merged.generation_seconds) == (
+            100.0,
+            150.0,
+            40.0,
+        )
+
     def test_merge_rejects_turns_from_different_trainer_models(self, mock_tokenizer: MagicMock) -> None:
         """Merging turns from different trainers rejects the cross-policy trajectory."""
         a = make_sample(tokens=[1, 2, 10], response_length=1, loss_mask=[1])

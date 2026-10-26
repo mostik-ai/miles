@@ -182,6 +182,9 @@ def _merge_sample_pair(a: Sample, b: Sample, tokenizer) -> Sample:
             routing_key=_merge_equal_value("routing_key"),
             trainer_model_id=_merge_equal_value("trainer_model_id"),
             non_generation_time=_merge_equal_value("non_generation_time"),
+            generation_started_at=_earliest_time(a.generation_started_at, b.generation_started_at),
+            generation_finished_at=_latest_time(a.generation_finished_at, b.generation_finished_at),
+            generation_seconds=a.generation_seconds + b.generation_seconds,
             spec_info=_merge_spec_info(a.spec_info, b.spec_info),
             prefix_cache_info=_merge_prefix_cache_info(a.prefix_cache_info, b.prefix_cache_info),
         )
@@ -213,6 +216,16 @@ def _merge_prefix_cache_info(a: Sample.PrefixCacheInfo, b: Sample.PrefixCacheInf
         cached_tokens=_merge_plus_value("cached_tokens"),
         total_prompt_tokens=_merge_plus_value("total_prompt_tokens"),
     )
+
+
+def _earliest_time(a: float | None, b: float | None) -> float | None:
+    times = [time for time in (a, b) if time is not None]
+    return min(times) if times else None
+
+
+def _latest_time(a: float | None, b: float | None) -> float | None:
+    times = [time for time in (a, b) if time is not None]
+    return max(times) if times else None
 
 
 def _create_with_all_fields(cls, **kwargs):

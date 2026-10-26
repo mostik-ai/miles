@@ -318,6 +318,25 @@ class TestStalenessFiltering:
         assert under_test.buffer.get_metrics()["rollout/fully_async/buffer_max_staleness"] == 12
 
 
+class TestBufferFill:
+    async def test_a_full_buffer_reports_a_fill_of_one_when_training_takes_a_batch(self) -> None:
+        """A fill of 1.0 means put() was holding generation back when the trainer took its batch."""
+        under_test = _make_buffer(rollout_batch_size=1, async_data_buffer_capacity_factor=2.0)
+        await _put(under_test.buffer, _make_finished_group(1))
+        await _put(under_test.buffer, _make_finished_group(2))
+
+        await _get_one(under_test.buffer)
+
+        assert under_test.buffer.get_metrics()["rollout/fully_async/buffer_fill"] == 1.0
+
+    async def test_no_fill_is_reported_until_training_takes_a_batch(self) -> None:
+        """The fill describes the moment of a get, so a report without one has none to give."""
+        under_test = _make_buffer()
+        await _put(under_test.buffer, _make_finished_group(1))
+
+        assert "rollout/fully_async/buffer_fill" not in under_test.buffer.get_metrics()
+
+
 # ============================== batched get ===============================
 
 
