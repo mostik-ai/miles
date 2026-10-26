@@ -54,7 +54,7 @@ from miles.utils.output_store.dropped import store_refs_of, take_dropped_refs
 from miles.utils.output_store.plan import StorePlanError
 from miles.utils.simple_checkpointer import atomic_save_folder
 from miles.utils.timer import timer
-from miles.utils.tracking_utils.tracking import init_tracking
+from miles.utils.tracking_utils.tracking import finish_tracking, init_tracking
 from miles.utils.weight_version import assert_samples_weight_version_sane, assert_weight_version_is_published
 from miles.utils.workers.rpc.common.metadata import DedicatedRpcLoopWorker
 from miles.utils.workers.worker_provider.base import BaseWorkerProvider
@@ -173,21 +173,25 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
             return
         self._disposed = True
 
-        if not self.use_legacy_rollout_v1 and self.generate_rollout is not None:
-            await maybe_await(self.generate_rollout.dispose())
-        if (
-            close := getattr(self.data_source, "close", None)
-        ) is not None:  # config-access-exempt: custom data sources may omit this lifecycle method
-            close()
-        event_analyzer.run_sample_ownership_analysis(args=self.args)
-        event_analyzer.run_analysis_from_args(self.args)
-        if self._metric_checker is not None:
-            self._metric_checker.dispose()
-        if isinstance(self.eval_generate_rollout, CheckpointEvalFn):
-            await maybe_await(self.eval_generate_rollout.dispose())
-        # Last, so a failed CI check raises after the rest of this dispose; only once init reached the store.
-        if self._delete_store_refs is not None:
-            await asyncio.to_thread(self._sweep_output_store)
+        try:
+            if not self.use_legacy_rollout_v1 and self.generate_rollout is not None:
+                await maybe_await(self.generate_rollout.dispose())
+            if (
+                close := getattr(self.data_source, "close", None)
+            ) is not None:  # config-access-exempt: custom data sources may omit this lifecycle method
+                close()
+            event_analyzer.run_sample_ownership_analysis(args=self.args)
+            event_analyzer.run_analysis_from_args(self.args)
+            if self._metric_checker is not None:
+                self._metric_checker.dispose()
+            if isinstance(self.eval_generate_rollout, CheckpointEvalFn):
+                await maybe_await(self.eval_generate_rollout.dispose())
+            # Last, so a failed CI check raises after the rest of this dispose; only once init reached the store.
+            if self._delete_store_refs is not None:
+                await asyncio.to_thread(self._sweep_output_store)
+        finally:
+            # Ray kills this actor when the job ends, so its trackers must send the last eval they still buffer first
+            finish_tracking()
 
     def _sweep_output_store(self) -> None:
         """Remove what the run left in the output store, which nothing reads once it ends."""

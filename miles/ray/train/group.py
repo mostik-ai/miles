@@ -173,6 +173,9 @@ class TrainerController:
         return cell
 
     async def dispose(self) -> None:
+        if any(cell.is_alive for cell in self._cells):
+            # Ray kills the actors when the job ends, so their trackers must send what they still buffer first
+            await self._execute_all_alive_and_catch("finish_tracking", check_recoverable=False, kill_on_failure=False)
         if (disposer := self._watcher_disposer) is not None:
             await disposer()
             self._watcher_disposer = None
