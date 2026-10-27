@@ -116,6 +116,11 @@ class DumperMegatronUtil:
     ) -> None:
         self.phase = phase
         self.rollout_id = rollout_id
+        self.enabled = False
+        self.overrides = {}
+        selected = getattr(args, "dumper_train_rollouts", None)
+        if selected is not None and rollout_id not in selected:
+            return
         self.overrides = _get_phase_override_configs(args, phase)
         self.enabled = self._configure(
             args, phase=phase, rollout_id=rollout_id, store_prefix=store_prefix, overrides=self.overrides

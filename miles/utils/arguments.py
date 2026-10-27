@@ -2314,6 +2314,14 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 "Per-phase --dumper-inference/--dumper-fwd-only/--dumper-fwd-bwd can override.",
             )
             parser.add_argument(
+                "--dumper-train-rollouts",
+                nargs="+",
+                type=int,
+                default=None,
+                help="Restrict Megatron forward-only and forward-backward dumps to these rollout IDs. "
+                "Does not enable dumping or change inference dumping; unset preserves every enabled training rollout.",
+            )
+            parser.add_argument(
                 "--dumper-dir",
                 type=str,
                 default="/tmp/dumper",
@@ -4137,6 +4145,11 @@ def miles_validate_args(args):
 
     if args.skip_actor_forward_only:
         validate_skip_actor_forward_only(args)
+
+    if args.dumper_train_rollouts is not None:
+        assert all(type(rollout_id) is int and rollout_id >= 0 for rollout_id in args.dumper_train_rollouts), (
+            "--dumper-train-rollouts requires nonnegative integer rollout IDs"
+        )
 
     _maybe_apply_dumper_overrides(args)
 
