@@ -67,6 +67,12 @@ def add_lora_arguments(parser):
         help="Path to load pre-trained LoRA adapter weights (default: None)",
     )
     parser.add_argument(
+        "--lora-checkpoint-format",
+        choices=["adapter", "torch_dist"],
+        default="adapter",
+        help="Save adapter-only files, or native Megatron checkpoints including the frozen model and training state.",
+    )
+    parser.add_argument(
         "--lora-sync-from-tensor",
         action="store_true",
         default=False,
@@ -139,6 +145,9 @@ def validate_lora_args(args):
         return
     assert args.train_backend == "megatron", "LoRA injection is not implemented for FSDP; use --train-backend megatron"
     assert args.lora_rank > 0, "LoRA requires a positive --lora-rank, including when loading an adapter"
+    if getattr(args, "lora_checkpoint_format", "adapter") == "torch_dist":
+        assert args.ckpt_format == "torch_dist", "Full LoRA checkpoints require --ckpt-format torch_dist"
+        assert not args.multi_lora, "Full LoRA checkpoints are not qualified for multi-LoRA"
     hf_config = load_hf_config(args.hf_checkpoint)
     args.hf_lora_targets, args.lora_adapter_targets = _resolve_lora_targets(args, hf_config)
 

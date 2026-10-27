@@ -182,11 +182,10 @@ class TestSaveLoRaBranch:
     @patch(f"{_MODEL_MODULE}.get_args")
     @patch(f"{_MODEL_MODULE}.save_checkpoint_with_lora")
     @patch(f"{_MODEL_MODULE}.is_lora_model", return_value=True)
-    def test_lora_model_calls_lora_save(
-        self, mock_is_lora, mock_save_lora, mock_get_args, mock_should, mock_disable, mock_enable, mock_save_hashes
-    ):
+    def test_lora_model_calls_lora_save(self, mock_is_lora, mock_save_lora, mock_get_args, mock_should, mock_disable, mock_enable, mock_save_hashes):
         from miles.backends.megatron_utils.model import save
 
+        mock_get_args.return_value = Namespace(ci_test=False)
         model = [MagicMock()]
         save(42, model, MagicMock(), MagicMock())
 
@@ -199,12 +198,37 @@ class TestSaveLoRaBranch:
     @patch(f"{_MODEL_MODULE}.get_args")
     @patch(f"{_MODEL_MODULE}.save_checkpoint")
     @patch(f"{_MODEL_MODULE}.is_lora_model", return_value=False)
-    def test_non_lora_model_calls_regular_save(
-        self, mock_is_lora, mock_save_ckpt, mock_get_args, mock_should, mock_disable, mock_enable, mock_save_hashes
-    ):
+    def test_non_lora_model_calls_regular_save(self, mock_is_lora, mock_save_ckpt, mock_get_args, mock_should, mock_disable, mock_enable, mock_save_hashes):
         from miles.backends.megatron_utils.model import save
 
         model = [MagicMock()]
         save(42, model, MagicMock(), MagicMock())
 
         mock_save_ckpt.assert_called_once()
+
+
+def test_full_lora_save_preserves_native_checkpoint_training_context() -> None:
+    from miles.backends.megatron_utils import model as backend
+
+    model, optimizer, scheduler, context = [MagicMock()], MagicMock(), MagicMock(), {"native_context": object()}
+    with (
+        patch.object(backend, "get_args", return_value=Namespace(ci_test=False, lora_checkpoint_format="torch_dist")),
+        patch.object(backend, "is_lora_model", return_value=True),
+        patch.object(backend, "should_disable_forward_pre_hook", return_value=False),
+        patch.object(backend, "save_checkpoint_with_lora") as adapter_save,
+        patch.object(backend, "save_checkpoint") as native_save,
+    ):
+        backend.save(7, model, optimizer, scheduler, checkpointing_context=context, non_persistent_ckpt=True)
+
+    adapter_save.assert_not_called()
+    native_save.assert_called_once_with(
+        7,
+        model,
+        optimizer,
+        scheduler,
+        num_floating_point_operations_so_far=0,
+        train_data_iterator=None,
+        preprocess_common_state_dict_fn=None,
+        checkpointing_context=context,
+        non_persistent_ckpt=True,
+    )
