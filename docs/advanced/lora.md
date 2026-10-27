@@ -16,6 +16,10 @@ publish boundary. Colocated jobs load them through the local tensor/IPC path;
 disaggregated Bridge jobs broadcast them to remote SGLang engines over NCCL.
 Rollout requests then select the live named adapter with `lora_path`.
 
+With `--no-offload-train`, colocated synchronization reads the resident actor
+weights. CPU-offloaded colocated LoRA reads its existing memory-saver backup;
+other offloaded configurations and model switching retain actor backups.
+
 Multi-LoRA currently supports disaggregated rollout only and rejects
 `--colocate` at launch. Each SGLang engine keeps the base checkpoint resident;
 adapter weights reach the engines through explicit pushes: each push registers

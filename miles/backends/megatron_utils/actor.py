@@ -540,11 +540,12 @@ class MegatronTrainRayActor(TrainRayActor):
 
     @property
     def _weight_sync_reads_tms_backup(self) -> bool:
-        """Under colocated LoRA the frozen base already has a memory-saver host backup; a
+        """Under CPU-offloaded colocated LoRA the frozen base has a memory-saver host backup; a
         pinned "actor" copy of it would duplicate the whole base per rank. Model switching
         still needs the real backups, and a disk offload target leaves no host backup to read."""
         return (
             self.args.colocate
+            and self.args.offload_train
             and is_lora_enabled(self.args)
             and self.args.offload_train_target == "cpu"
             and not (self.with_ref or self.with_opd_teacher or self.args.keep_old_actor)
@@ -559,7 +560,6 @@ class MegatronTrainRayActor(TrainRayActor):
             self.with_ref
             or self.with_opd_teacher
             or self.args.keep_old_actor
-            or self.args.colocate
             or self.args.offload_train
         )
 
@@ -938,7 +938,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self._weight_sync_reads_tms_backup:
             return dict(self._named_actor_weights(translate_gpu_to_cpu=True))
         # use cpu backup only when weight is not live on gpu
-        if self.args.colocate or self._asleep or self._active_model_tag != "actor":
+        if (self.args.colocate and self.args.offload_train) or self._asleep or self._active_model_tag != "actor":
             return self.weights_backuper.get("actor")
         return dict(self._named_actor_weights())
 
