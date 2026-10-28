@@ -17,6 +17,7 @@ from megatron.training.checkpointing import load_checkpoint as _load_checkpoint_
 from megatron.training.checkpointing import save_checkpoint
 from megatron.training.global_vars import get_args
 
+from miles.backends.megatron_utils.hf_hidden_modules import hide_marked_modules
 from miles.backends.megatron_utils.megatron_config import has_hf_checkpoint
 from miles.backends.training_utils.model_companion import (
     ModelCompanionInstallationUtils,
@@ -279,6 +280,7 @@ def _load_hf_weights_with_mbridge(ddp_model, args, load_path: str) -> None:
     with (
         ModelCompanionInstallationUtils.hide(ddp_model),
         _hide_critic_value_head_from_hf_load(ddp_model),
+        hide_marked_modules(unwrap_model(ddp_model)),
         bypass,
     ):
         bridge = AutoBridge.from_pretrained(load_path, trust_remote_code=True)
@@ -294,7 +296,11 @@ def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):
 
         logger.info(f"Load checkpoint from HuggingFace model into Megatron (path={load_path})")
 
-        with megatron_bridge_utils.patch_megatron_model(ddp_model), _hide_critic_value_head_from_hf_load(ddp_model):
+        with (
+            megatron_bridge_utils.patch_megatron_model(ddp_model),
+            _hide_critic_value_head_from_hf_load(ddp_model),
+            hide_marked_modules(unwrap_model(ddp_model)),
+        ):
             bridge = AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
             bridge.load_hf_weights(ddp_model)
 
