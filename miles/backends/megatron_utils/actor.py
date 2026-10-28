@@ -79,6 +79,7 @@ from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.parallel import get_parallel_state
 from .checkpoint import load_checkpoint
+from .flash_attn_4_window import patch_flash_attn_4_window
 from .ft.checkpoint_transfer import recv_ckpt
 from .ft.checkpoint_transfer import send_ckpt as _send_ckpt
 from .ft.in_memory_checkpoint import InMemoryCheckpointManager
@@ -137,6 +138,7 @@ class MegatronTrainRayActor(TrainRayActor):
         self.weight_updater: WeightUpdater | None = None
         self.snapshot_publisher: SnapshotPublisher | None = None
         monkey_patch_torch_dist()
+        patch_flash_attn_4_window()
 
         self._last_rollout_id: int | None = None
         self._cell_index = indep_dp_info.cell_index
