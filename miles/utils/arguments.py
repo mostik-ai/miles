@@ -1549,6 +1549,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--eval-snapshot-wait-seconds",
+                type=float,
+                default=0.0,
+                help=(
+                    "How long an eval point waits for its HF snapshot's completion marker before it is skipped as "
+                    "ckpt_missing. 0 checks once. A filesystem that shows one node's writes to another node only "
+                    "after a delay, such as a Modal Volume the eval node reloads periodically, needs a wait."
+                ),
+            )
+            parser.add_argument(
                 "--eval-max-in-flight",
                 type=int,
                 default=2,

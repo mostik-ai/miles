@@ -58,6 +58,7 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 _DATA_SOURCE_DIRNAME = "data_source"
+SNAPSHOT_POLL_SECONDS = 5.0
 _GENERATE_ROLLOUT_DIRNAME = "generate_rollout"
 _EVAL_GENERATE_ROLLOUT_DIRNAME = "eval_generate_rollout"
 _EXECUTOR_DIRNAME = "executor"
@@ -267,6 +268,15 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
         if self._metric_checker is not None:
             self._metric_checker.on_eval(metrics)
 
+    async def _snapshot_arrives(self, hf_dir: str) -> bool:
+        """Whether the snapshot's completion marker appears within --eval-snapshot-wait-seconds."""
+        deadline = time.monotonic() + self.args.eval_snapshot_wait_seconds
+        while not is_complete_hf_export(hf_dir):
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(SNAPSHOT_POLL_SECONDS)
+        return True
+
     async def _eval_checkpoint(
         self,
         rollout_id: int,
@@ -287,7 +297,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
             raise ValueError("A live eval version requires a dedicated synchronized fleet")
         start_time = time.time()
         async with self._eval_lock:
-            if weight_version is None and require_marker and not is_complete_hf_export(hf_dir):
+            if weight_version is None and require_marker and not await self._snapshot_arrives(hf_dir):
                 logger.warning(f"Eval snapshot {hf_dir} missing or incomplete, skipping eval {rollout_id}")
                 return self.report_eval_skip(rollout_id, "ckpt_missing")
 

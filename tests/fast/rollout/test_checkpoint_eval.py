@@ -24,6 +24,7 @@ def make_args(**overrides) -> Namespace:
         eval_num_gpus_per_engine=1,
         eval_uses_snapshots=True,
         eval_function_path=None,
+        eval_snapshot_wait_seconds=0.0,
         debug_train_only=False,
         offload_train=False,
         ci_test=False,
@@ -213,6 +214,40 @@ async def test_eval_checkpoint_missing_marker_skips(controller_env, tmp_path):
 
     fn = CheckpointFnStub()
     args = make_args(hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2)
+    mgr = make_manager(args, eval_fn=fn)
+
+    await mgr.eval(5, hf_dir=str(snapshot))
+
+    assert fn.inputs == []
+    assert controller_env.logged["skip"] == (5, "ckpt_missing")
+
+
+async def test_eval_checkpoint_waits_for_a_marker_that_arrives_within_the_wait(controller_env, tmp_path, monkeypatch):
+    snapshot = tmp_path / "step_5"
+    snapshot.mkdir()
+    monkeypatch.setattr(rollout_executor_mod, "SNAPSHOT_POLL_SECONDS", 0.01)
+
+    async def marker_arrives_later():
+        await asyncio.sleep(0.05)
+        (snapshot / ".complete").touch()
+
+    fn = CheckpointFnStub()
+    args = make_args(hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2, eval_snapshot_wait_seconds=5.0)
+    mgr = make_manager(args, eval_fn=fn)
+
+    await asyncio.gather(mgr.eval(5, hf_dir=str(snapshot)), marker_arrives_later())
+
+    assert len(fn.inputs) == 1
+    assert "skip" not in controller_env.logged
+
+
+async def test_eval_checkpoint_skips_a_marker_that_misses_the_wait(controller_env, tmp_path, monkeypatch):
+    snapshot = tmp_path / "step_5"
+    snapshot.mkdir()
+    monkeypatch.setattr(rollout_executor_mod, "SNAPSHOT_POLL_SECONDS", 0.01)
+
+    fn = CheckpointFnStub()
+    args = make_args(hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2, eval_snapshot_wait_seconds=0.05)
     mgr = make_manager(args, eval_fn=fn)
 
     await mgr.eval(5, hf_dir=str(snapshot))
