@@ -320,3 +320,35 @@ class TestTerminalLifecycle:
             events.index(event) < events.index("manager_shutdown") for event in events if event.endswith("_dispose")
         )
         assert events.index("manager_shutdown") < events.index("manager_kill")
+
+
+class TestCheckpointOrder:
+    async def test_rollout_state_is_saved_before_the_model_checkpoint_that_marks_it_resumable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A resumable model checkpoint must not precede its matching data progress."""
+        events: list[str] = []
+        args = _make_args(num_rollout=2, save_interval=1)
+        components = _install_driver_fakes(monkeypatch, args, events)
+
+        await with_disposer(train_async_driver.train, args)
+
+        assert components.actor_model.saved == [0, 1]
+        for rollout_id in components.actor_model.saved:
+            assert events.index(f"executor_save:{rollout_id}") < events.index(f"actor_save:{rollout_id}")
+
+    async def test_rollout_save_failure_does_not_publish_a_model_checkpoint(self, monkeypatch: pytest.MonkeyPatch):
+        """A resumable model checkpoint must not precede its matching data progress."""
+        events: list[str] = []
+        args = _make_args(num_rollout=1, save_interval=1)
+        components = _install_driver_fakes(monkeypatch, args, events)
+
+        async def fail_rollout_save(rollout_id):
+            raise OSError("rollout state write failed")
+
+        components.rollout_executor.save = fail_rollout_save
+
+        with pytest.raises(OSError, match="rollout state write failed"):
+            await with_disposer(train_async_driver.train, args)
+
+        assert components.actor_model.saved == []
