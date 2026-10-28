@@ -13,7 +13,7 @@ from miles.utils.lora.hf_lora_targets import (
     parse_lora_targets,
     resolve_hf_lora_targets,
 )
-from miles.utils.lora.utils import is_lora_enabled, matches_lora_target, targets_expert_leaves
+from miles.utils.lora.utils import is_lora_enabled, is_multi_lora_enabled, matches_lora_target, targets_expert_leaves
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +71,16 @@ def add_lora_arguments(parser):
         type=str,
         default=None,
         help="Path to load pre-trained LoRA adapter weights (default: None)",
+    )
+    parser.add_argument(
+        "--lora-checkpoint-format",
+        choices=["adapter", "torch_dist"],
+        default="adapter",
+        help=(
+            "adapter: save the adapter shards and their optimizer state, restored through --lora-adapter-path. "
+            "torch_dist: save Megatron's own checkpoint, the frozen model and the RNG state included, which --load "
+            "restores like any other run; Bridge LoRA only, since native adapters are not in Megatron's state."
+        ),
     )
     parser.add_argument(
         "--lora-sync-from-tensor",
@@ -145,6 +155,12 @@ def validate_lora_args(args):
         return
     assert args.train_backend == "megatron", "LoRA injection is not implemented for FSDP; use --train-backend megatron"
     assert args.lora_rank > 0, "LoRA requires a positive --lora-rank, including when loading an adapter"
+    if args.lora_checkpoint_format == "torch_dist":
+        assert args.megatron_to_hf_mode == "bridge", (
+            "--lora-checkpoint-format torch_dist needs --megatron-to-hf-mode bridge: native adapters keep out of "
+            "Megatron's sharded state, so its checkpoint would hold the frozen model without them"
+        )
+        assert not is_multi_lora_enabled(args), "--lora-checkpoint-format torch_dist saves one adapter, not slots"
     hf_config = load_hf_config(args.hf_checkpoint)
     args.hf_lora_targets, args.lora_adapter_targets = _resolve_lora_targets(args, hf_config)
 
