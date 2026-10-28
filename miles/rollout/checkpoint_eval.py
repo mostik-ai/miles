@@ -37,13 +37,16 @@ def retarget_args(args: Namespace, router_ip, router_port, num_gpus: int, num_gp
 
     Generate functions read the router from ``args`` and ``GenerateState`` sizes its
     semaphore off the GPU counts, so a retargeted copy runs the standard eval path
-    against a different set of engines unchanged.
+    against a different set of engines unchanged. Those engines serve HF snapshots,
+    whose weights already hold any LoRA adapter merged in, so the copy asks for no
+    adapter: the training engines' adapter is not loaded there.
     """
     eval_args = copy.copy(args)
     eval_args.sglang_router_ip = router_ip
     eval_args.sglang_router_port = router_port
     eval_args.rollout_num_gpus = num_gpus
     eval_args.rollout_num_gpus_per_engine = num_gpus_per_engine
+    eval_args.lora_train_only = True
     return eval_args
 
 

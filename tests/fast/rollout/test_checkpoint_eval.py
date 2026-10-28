@@ -46,6 +46,15 @@ def test_retarget_args_swaps_router_and_sizing():
     assert args.rollout_num_gpus == 4
 
 
+def test_retargeted_lora_eval_asks_the_snapshot_engines_for_no_adapter():
+    from miles.utils.lora.utils import lora_rollout_enabled
+
+    args = make_args(lora_rank=32, lora_train_only=False, train_backend="megatron")
+    eval_args = retarget_args(args, "10.0.0.9", 39000, num_gpus=8, num_gpus_per_engine=1)
+
+    assert (lora_rollout_enabled(args), lora_rollout_enabled(eval_args)) == (True, False)
+
+
 # ---------------- RolloutManager._eval_checkpoint (the single snapshot path) ----------------
 
 
