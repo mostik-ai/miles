@@ -11,6 +11,7 @@ import pytest
 import miles.ray.rollout.rollout_executor as rollout_executor_mod
 from miles.rollout.base_types import RolloutFnEvalInput, RolloutFnEvalOutput
 from miles.rollout.checkpoint_eval import CheckpointEvalFn, EvalSkip, retarget_args
+from miles.utils.function_registry import function_registry
 
 
 def make_args(**overrides) -> Namespace:
@@ -25,6 +26,7 @@ def make_args(**overrides) -> Namespace:
         eval_uses_snapshots=True,
         eval_function_path=None,
         eval_snapshot_wait_seconds=0.0,
+        eval_snapshot_refresh_function_path=None,
         debug_train_only=False,
         offload_train=False,
         ci_test=False,
@@ -239,6 +241,34 @@ async def test_eval_checkpoint_waits_for_a_marker_that_arrives_within_the_wait(c
 
     assert len(fn.inputs) == 1
     assert "skip" not in controller_env.logged
+
+
+async def test_eval_checkpoint_refreshes_the_filesystem_before_each_check(controller_env, tmp_path, monkeypatch):
+    snapshot = tmp_path / "step_5"
+    snapshot.mkdir()
+    monkeypatch.setattr(rollout_executor_mod, "SNAPSHOT_POLL_SECONDS", 0.01)
+    refreshed = []
+
+    def refresh(hf_dir):
+        refreshed.append(hf_dir)
+        if len(refreshed) == 2:
+            (snapshot / ".complete").touch()
+
+    fn = CheckpointFnStub()
+    args = make_args(
+        hf_checkpoint="/base",
+        eval_hf_dir=str(tmp_path),
+        eval_keep_snapshots=2,
+        eval_snapshot_wait_seconds=5.0,
+        eval_snapshot_refresh_function_path="test:refresh_snapshot_view",
+    )
+    mgr = make_manager(args, eval_fn=fn)
+
+    with function_registry.temporary("test:refresh_snapshot_view", refresh):
+        await mgr.eval(5, hf_dir=str(snapshot))
+
+    assert refreshed == [str(snapshot), str(snapshot)]
+    assert len(fn.inputs) == 1
 
 
 async def test_eval_checkpoint_skips_a_marker_that_misses_the_wait(controller_env, tmp_path, monkeypatch):

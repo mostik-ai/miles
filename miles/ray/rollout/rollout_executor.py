@@ -269,13 +269,18 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
             self._metric_checker.on_eval(metrics)
 
     async def _snapshot_arrives(self, hf_dir: str) -> bool:
-        """Whether the snapshot's completion marker appears within --eval-snapshot-wait-seconds."""
+        """Whether the snapshot's completion marker appears within --eval-snapshot-wait-seconds; the filesystem's view
+        is refreshed with --eval-snapshot-refresh-function-path before each check."""
+        refresh = load_function(self.args.eval_snapshot_refresh_function_path, sync_required=True)
         deadline = time.monotonic() + self.args.eval_snapshot_wait_seconds
-        while not is_complete_hf_export(hf_dir):
+        while True:
+            if refresh is not None:
+                await asyncio.to_thread(refresh, hf_dir)
+            if is_complete_hf_export(hf_dir):
+                return True
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(SNAPSHOT_POLL_SECONDS)
-        return True
 
     async def _eval_checkpoint(
         self,

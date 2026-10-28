@@ -1555,7 +1555,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "How long an eval point waits for its HF snapshot's completion marker before it is skipped as "
                     "ckpt_missing. 0 checks once. A filesystem that shows one node's writes to another node only "
-                    "after a delay, such as a Modal Volume the eval node reloads periodically, needs a wait."
+                    "after a delay or a refresh, such as a Modal Volume, needs a wait."
+                ),
+            )
+            parser.add_argument(
+                "--eval-snapshot-refresh-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "A synchronous function called, in a thread, with an eval snapshot's directory before each check "
+                    "of its completion marker, for a filesystem that shows another node's writes only after an "
+                    "explicit refresh, such as a Modal Volume's reload()."
                 ),
             )
             parser.add_argument(
