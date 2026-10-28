@@ -191,10 +191,39 @@ class TestSaveLoRaBranch:
     ):
         from miles.backends.megatron_utils.model import save
 
+        mock_get_args.return_value = Namespace(ci_test=False, lora_checkpoint_format="adapter")
         model = [MagicMock()]
         save(42, model, MagicMock(), MagicMock())
 
         mock_save_lora.assert_called_once()
+
+    @patch(f"{_MODEL_MODULE}.save_model_hashes")
+    @patch(f"{_MODEL_MODULE}.enable_forward_pre_hook")
+    @patch(f"{_MODEL_MODULE}.disable_forward_pre_hook")
+    @patch(f"{_MODEL_MODULE}.should_disable_forward_pre_hook", return_value=False)
+    @patch(f"{_MODEL_MODULE}.get_args")
+    @patch(f"{_MODEL_MODULE}.save_checkpoint")
+    @patch(f"{_MODEL_MODULE}.save_checkpoint_with_lora")
+    @patch(f"{_MODEL_MODULE}.is_lora_model", return_value=True)
+    def test_lora_model_with_torch_dist_format_saves_megatrons_own_checkpoint(
+        self,
+        mock_is_lora,
+        mock_save_lora,
+        mock_save_ckpt,
+        mock_get_args,
+        mock_should,
+        mock_disable,
+        mock_enable,
+        mock_save_hashes,
+    ):
+        from miles.backends.megatron_utils.model import save
+
+        mock_get_args.return_value = Namespace(ci_test=False, lora_checkpoint_format="torch_dist")
+        model = [MagicMock()]
+        save(42, model, MagicMock(), MagicMock())
+
+        mock_save_lora.assert_not_called()
+        mock_save_ckpt.assert_called_once()
 
     @patch(f"{_MODEL_MODULE}.save_model_hashes")
     @patch(f"{_MODEL_MODULE}.enable_forward_pre_hook")
