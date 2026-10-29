@@ -729,6 +729,12 @@ def setup_train_iteration_config(args, model, optimizer, disable_optimizer):
     return config
 
 
+def step_learning_rates(optimizer: MegatronOptimizer) -> list[float]:
+    """The learning rate of each parameter group that the coming step updates with. Once the step has run, the
+    scheduler holds the next step's, so a step's log must read these before it."""
+    return [param_group["lr"] for param_group in optimizer.param_groups]
+
+
 def train(
     rollout_id: int,
     model: Sequence[DDP],
@@ -804,8 +810,7 @@ def train(
     # Run training iterations till done.
     for step_id in range(num_steps_per_rollout):
 
-        # The learning rates this step updates with: once it has run, the scheduler holds the next step's
-        step_lrs = [] if disable_optimizer else [param_group["lr"] for param_group in optimizer.param_groups]
+        step_lrs = [] if disable_optimizer else step_learning_rates(optimizer)
 
         # Run training step.
         loss_dict, grad_norm, train_step_outcome = train_one_step(
