@@ -804,6 +804,9 @@ def train(
     # Run training iterations till done.
     for step_id in range(num_steps_per_rollout):
 
+        # The learning rates this step updates with: once it has run, the scheduler holds the next step's
+        step_lrs = [] if disable_optimizer else [param_group["lr"] for param_group in optimizer.param_groups]
+
         # Run training step.
         loss_dict, grad_norm, train_step_outcome = train_one_step(
             args,
@@ -860,9 +863,8 @@ def train(
             if args.enable_mtp_training and mtp_losses is not None:
                 extra_metrics["mtp_loss"] = mtp_losses
 
-            if not disable_optimizer:
-                for param_group_id, param_group in enumerate(optimizer.param_groups):
-                    extra_metrics[f"lr-pg_{param_group_id}"] = opt_param_scheduler.get_lr(param_group)
+            for param_group_id, step_lr in enumerate(step_lrs):
+                extra_metrics[f"lr-pg_{param_group_id}"] = step_lr
 
             log_dict = log_train_step(
                 args=args,
