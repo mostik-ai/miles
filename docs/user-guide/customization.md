@@ -33,6 +33,7 @@ and the default it replaces.
 | | `--custom-megatron-post-save-hook-path` | After each checkpoint save |
 | **Logging** | `--custom-rollout-log-function-path` | Train-rollout logging |
 | | `--custom-eval-rollout-log-function-path` | Eval-rollout logging |
+| | `--custom-train-step-log-function-path` | After each train step is logged |
 | **Model** | `--custom-model-provider-path` | Megatron model factory |
 
 ---
@@ -292,6 +293,15 @@ def log_eval_rollout_data(rollout_id, args, data, extra_metrics) -> bool:
 ```
 
 Return `True` to suppress Miles's default logging, `False` to layer on top.
+
+```python
+# Train steps: called after Miles logs the step, on the rank that logs it
+def log_train_step(rollout_id, step_id, args, log_dict) -> None:
+    ...
+```
+
+`log_dict` holds the `train/` metrics Miles just logged. Raise to stop the run, for example when a metric shows the
+trainer and the rollout engine disagree.
 
 ---
 

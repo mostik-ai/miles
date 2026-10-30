@@ -1010,6 +1010,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "The return value indicates whether to skip the default logging. "
                 ),
             )
+            parser.add_argument(
+                "--custom-train-step-log-function-path",
+                type=str,
+                default=None,
+                help=(
+                    "The custom function called after the default logging of every train step, on the rank that "
+                    "logs it. The signature of the function is: "
+                    "def log_train_step(rollout_id, step_id, args, log_dict) -> None. "
+                    "log_dict holds the train/ metrics just logged. An exception it raises stops the run. "
+                ),
+            )
 
             parser.add_argument(
                 "--buffer-filter-path",

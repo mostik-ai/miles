@@ -13,6 +13,7 @@ from miles.backends.training_utils.data.rollout import DataIterator
 from miles.backends.training_utils.metrics import perf
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.flops_utils import fwd_tflops_per_gpu
+from miles.utils.function_registry import load_function
 from miles.utils.ft_utils.process_group_utils import MultiPGUtil
 from miles.utils.metric_utils import compute_rollout_step, namespace_metrics, strip_metrics_namespace
 from miles.utils.tracking_utils import tracking
@@ -575,5 +576,7 @@ def log_train_step(
     if should_log:
         tracking.log(args, log_dict_out, step_key=step_key)
         logger.info(f"{role_tag}step {accumulated_step_id}: {log_dict_out}")
+        if (x := args.custom_train_step_log_function_path) is not None:
+            load_function(x)(rollout_id, step_id, args, log_dict_out)
 
     return log_dict_out
