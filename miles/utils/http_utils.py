@@ -421,6 +421,45 @@ def _init_ray_distributed_post(args):
     _post_actors = created
 
 
+class _AiohttpTransport(httpx.AsyncBaseTransport):
+    """Sends httpx requests through one aiohttp connection pool, with no deadlines.
+
+    httpcore's pool walks every connection, and for each idle one every connection again, whenever a request starts
+    or a reply closes. With thousands of rollout requests in flight, a wave of finished generations held the event
+    loop for minutes. aiohttp hands out and takes back a connection without a scan, and parses replies in C.
+    """
+
+    def __init__(self, *, max_connections: int) -> None:
+        # Built on the running loop, which the session binds to; keep-alive matches httpx's 5 s default.
+        self._session = aiohttp.ClientSession(
+            connector=aiohttp.TCPConnector(limit=max_connections, keepalive_timeout=5),
+            timeout=aiohttp.ClientTimeout(total=None),
+            auto_decompress=False,  # httpx decodes the body by its Content-Encoding
+            cookie_jar=aiohttp.DummyCookieJar(),
+        )
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        try:
+            # httpx already set every header aiohttp would add. An empty body goes as none, so aiohttp adds no
+            # Content-Type to a GET.
+            async with self._session.request(
+                request.method,
+                str(request.url),
+                headers=request.headers.multi_items(),
+                data=await request.aread() or None,
+                allow_redirects=False,
+            ) as response:
+                content = await response.read()
+        except aiohttp.ClientConnectorError as exc:
+            raise httpx.ConnectError(str(exc), request=request) from exc
+        except aiohttp.ClientError as exc:
+            raise httpx.ReadError(str(exc), request=request) from exc
+        return httpx.Response(response.status, headers=response.raw_headers, content=content, request=request)
+
+    async def aclose(self) -> None:
+        await self._session.close()
+
+
 def _rollout_client() -> httpx.AsyncClient:
     # a process where init_http_client never ran, such as a subproc agent call, gets a default client
     if _client_concurrency == 0:
@@ -429,7 +468,7 @@ def _rollout_client() -> httpx.AsyncClient:
     loop = asyncio.get_running_loop()
     if (client := _http_clients.get(loop)) is None:
         client = httpx.AsyncClient(
-            limits=httpx.Limits(max_connections=_client_concurrency),
+            transport=_AiohttpTransport(max_connections=_client_concurrency),
             timeout=httpx.Timeout(None),
         )
         _http_clients[loop] = client
