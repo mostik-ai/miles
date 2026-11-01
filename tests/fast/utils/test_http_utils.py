@@ -23,6 +23,7 @@ This lets us simulate 20 seconds of polling in <1ms of real time.
 
 import asyncio
 import inspect
+import json
 import multiprocessing
 import socket
 import subprocess
@@ -663,6 +664,45 @@ class _RecordingTransport(httpx.AsyncBaseTransport):
         return httpx.Response(200)
 
 
+class _EchoHttpServer:
+    """Answers every request with the method, path, headers and body that reached it; /fail answers 500."""
+
+    def __init__(self):
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), self._Handler)
+        self.url = f"http://127.0.0.1:{self._server.server_address[1]}"
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self):
+            self._echo()
+
+        def do_POST(self):
+            self._echo()
+
+        def _echo(self):
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if self.path == "/fail":
+                status, content_type, reply = 500, "text/plain", b"engine down"
+            else:
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                echoed = {"method": self.command, "path": self.path, "headers": headers, "body": body.decode()}
+                status, content_type, reply = 200, "application/json", json.dumps(echoed).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(reply)))
+            self.end_headers()
+            self.wfile.write(reply)
+
+        def log_message(self, format, *args):
+            pass
+
+
 class TestDistributedPostActors:
     def test_the_poster_actor_is_constructed_with_keyword_arguments(self, monkeypatch):
         """A positional handoff silently binds to the wrong parameter once the actor grows another one."""
@@ -812,3 +852,89 @@ class TestInitHttpClientConcurrency:
     def test_no_client_without_gpus_or_snapshot_eval(self, monkeypatch):
         _, client = self._init(monkeypatch, self._args(eval_uses_snapshots=False))
         assert client is None
+
+
+class TestRolloutClient:
+    """Rollout requests keep httpx's API but go through aiohttp's connection pool."""
+
+    _CONNECTIONS = 3
+
+    @pytest.fixture
+    async def client(self, monkeypatch):
+        monkeypatch.setattr(http_utils, "_http_clients", {})
+        monkeypatch.setattr(http_utils, "_client_concurrency", self._CONNECTIONS)
+        client = http_utils._rollout_client()
+        yield client
+        await client.aclose()
+
+    async def test_a_json_post_reaches_the_server_as_httpx_writes_it(self, client):
+        """SGLang parses the body by its Content-Type, so aiohttp must not replace any header httpx set."""
+        server = _EchoHttpServer()
+        try:
+            response = await client.post(f"{server.url}/generate", json={"input_ids": [1, 2]})
+        finally:
+            server.close()
+
+        echoed = response.json()
+        assert (echoed["method"], echoed["path"]) == ("POST", "/generate")
+        assert json.loads(echoed["body"]) == {"input_ids": [1, 2]}
+        assert echoed["headers"]["content-type"] == "application/json"
+        assert echoed["headers"]["user-agent"].startswith("python-httpx/")
+
+    async def test_a_get_goes_out_without_body_headers(self, client):
+        """httpx sends a GET with no body headers; aiohttp adds an octet-stream Content-Type to an empty body."""
+        server = _EchoHttpServer()
+        try:
+            echoed = (await client.get(f"{server.url}/workers")).json()
+        finally:
+            server.close()
+
+        assert echoed["method"] == "GET"
+        assert "content-type" not in echoed["headers"]
+        assert "content-length" not in echoed["headers"]
+
+    async def test_an_error_reply_keeps_its_body_for_the_retry_log(self, client):
+        """_post logs the body of an HTTPStatusError, which is how an engine tells why it refused."""
+        server = _EchoHttpServer()
+        try:
+            response = await client.post(f"{server.url}/fail", json={})
+        finally:
+            server.close()
+
+        with pytest.raises(httpx.HTTPStatusError) as raised:
+            response.raise_for_status()
+        assert raised.value.response.status_code == 500
+        assert raised.value.response.text == "engine down"
+
+    async def test_a_refused_connection_is_an_httpx_connect_error(self, client):
+        """Callers tell a request that never reached the server from one cut off mid-reply by httpx's types."""
+        with pytest.raises(httpx.ConnectError):
+            await client.get(f"http://127.0.0.1:{_find_free_port()}/workers")
+
+    async def test_no_more_requests_than_the_client_concurrency_reach_the_server_at_once(self, client):
+        """The connection cap sized from the engines' concurrency still bounds what one process sends."""
+        num_requests = self._CONNECTIONS + 2
+        arrived = _ArrivalGate()
+        server = _BlockingHttpServer(arrived)
+
+        try:
+            requests = [asyncio.create_task(client.get(server.url)) for _ in range(num_requests)]
+            deadline = time.monotonic() + 60
+            while arrived.count < self._CONNECTIONS:
+                assert time.monotonic() < deadline, f"only {arrived.count}/{self._CONNECTIONS} requests arrived"
+                await asyncio.sleep(0.01)
+            await asyncio.sleep(0.5)
+            assert arrived.count == self._CONNECTIONS
+
+            arrived.release()
+            assert [response.status_code for response in await asyncio.gather(*requests)] == [200] * num_requests
+        finally:
+            arrived.release()
+            server.close()
+
+    async def test_a_rollout_request_has_no_deadline(self, client):
+        """A generation can run for many minutes, and a loop busy past aiohttp's default 30 s connect limit must
+        not fail a connection the kernel already completed."""
+        timeout = client._transport._session.timeout
+
+        assert (timeout.total, timeout.connect, timeout.sock_connect, timeout.sock_read) == (None, None, None, None)
