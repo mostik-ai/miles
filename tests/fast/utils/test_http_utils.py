@@ -24,6 +24,7 @@ This lets us simulate 20 seconds of polling in <1ms of real time.
 import asyncio
 import inspect
 import json
+import math
 import multiprocessing
 import socket
 import subprocess
@@ -36,6 +37,7 @@ from typing import Any, NamedTuple
 from unittest.mock import patch
 
 import httpx
+import orjson
 import pytest
 import ray
 from tests.fast.import_isolation_utils import run_with_blocked_imports
@@ -982,3 +984,25 @@ class TestRolloutClient:
         timeout = client._transport._session.timeout
 
         assert (timeout.total, timeout.connect, timeout.sock_connect, timeout.sock_read) == (None, None, None, None)
+
+
+class TestPostReplyDecoding:
+    """_post decodes a reply with orjson and keeps what json made of the replies orjson refuses."""
+
+    @staticmethod
+    async def _post_reply(body: bytes):
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, content=body))
+        async with httpx.AsyncClient(transport=transport) as client:
+            return await http_utils._post(client, "http://sglang.invalid/generate", {})
+
+    async def test_a_json_reply_comes_back_decoded(self):
+        reply = {"text": "4", "meta_info": {"output_token_logprobs": [[-0.25, 19, None]], "completion_tokens": 1}}
+
+        assert await self._post_reply(orjson.dumps(reply)) == reply
+
+    async def test_a_nan_that_only_json_reads_still_comes_back_as_a_float(self):
+        """Python's json.dumps writes NaN for a nan reward, and orjson refuses that token."""
+        assert math.isnan((await self._post_reply(b'{"reward": NaN}'))["reward"])
+
+    async def test_a_reply_that_is_not_json_comes_back_as_its_text(self):
+        assert await self._post_reply(b"engine paused") == "engine paused"
