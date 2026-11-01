@@ -234,7 +234,9 @@ async def test_eval_checkpoint_waits_for_a_marker_that_arrives_within_the_wait(c
         (snapshot / ".complete").touch()
 
     fn = CheckpointFnStub()
-    args = make_args(hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2, eval_snapshot_wait_seconds=5.0)
+    args = make_args(
+        hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2, eval_snapshot_wait_seconds=5.0
+    )
     mgr = make_manager(args, eval_fn=fn)
 
     await asyncio.gather(mgr.eval(5, hf_dir=str(snapshot)), marker_arrives_later())
@@ -277,7 +279,9 @@ async def test_eval_checkpoint_skips_a_marker_that_misses_the_wait(controller_en
     monkeypatch.setattr(rollout_executor_mod, "SNAPSHOT_POLL_SECONDS", 0.01)
 
     fn = CheckpointFnStub()
-    args = make_args(hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2, eval_snapshot_wait_seconds=0.05)
+    args = make_args(
+        hf_checkpoint="/base", eval_hf_dir=str(tmp_path), eval_keep_snapshots=2, eval_snapshot_wait_seconds=0.05
+    )
     mgr = make_manager(args, eval_fn=fn)
 
     await mgr.eval(5, hf_dir=str(snapshot))
