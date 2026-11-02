@@ -78,3 +78,42 @@ def test_reassemble_bails_on_indivisible_segment():
     cu = [0, 6]  # 6 not divisible by 2*cp=4
     gathered = [torch.zeros(3, dtype=torch.long), torch.zeros(3, dtype=torch.long)]
     assert _reassemble_full_row(gathered, cu, cp_size=2) is None
+
+
+def test_cp_sharded_row_passes_rank_local_positions(monkeypatch):
+    # A CP-pre-sharded THD row must reach the bridge forward with rank-local 3D MRoPE
+    # position_ids: Megatron-Bridge 2e09c234 raises without them.
+    import types
+
+    import miles_plugins.models.qwen3_vl as plugin
+
+    cp_size, cp_rank = 2, 1
+    samples, per_rank, cu = _build_like_get_batch([10, 7, 13], cp_size)
+    expected = torch.cat(
+        [
+            _natural_to_zigzag_slice(
+                torch.arange(cu[i + 1] - cu[i]).view(1, 1, -1).expand(3, 1, -1), cp_size, cp_rank, dim=2
+            )
+            for i in range(len(cu) - 1)
+        ],
+        dim=2,
+    )
+    seen = {}
+
+    class FakeModel:
+        def forward(self, *args, **kwargs):
+            seen.update(kwargs)
+
+    model_mod = types.SimpleNamespace(get_rope_index=lambda *a, **k: (None, None), Qwen3VLModel=FakeModel)
+    monkeypatch.setattr(plugin.importlib, "import_module", lambda name: model_mod)
+    monkeypatch.setattr(plugin, "_cp_size_rank", lambda: (cp_size, cp_rank))
+    monkeypatch.setattr(plugin, "_cp_allgather_unzigzag", lambda flat, cu, cp: _reassemble_full_row(per_rank, cu, cp))
+    plugin._patch_model_forward_and_rope_index()
+
+    model = FakeModel()
+    model.config = types.SimpleNamespace(spatial_merge_size=2)
+    model.image_token_id, model.video_token_id, model.vision_start_token_id = -1, -2, -3
+    psp = types.SimpleNamespace(qkv_format="thd", cu_seqlens_q=torch.tensor(cu))
+    model.forward(input_ids=per_rank[cp_rank].unsqueeze(0), position_ids=None, packed_seq_params=psp)
+
+    assert torch.equal(seen["position_ids"], expected)

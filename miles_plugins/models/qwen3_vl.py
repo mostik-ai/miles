@@ -116,6 +116,10 @@ def _patch_model_forward_and_rope_index() -> None:
         parsed = _parse_packed_thd(args, kwargs)
         packed = _build_packed_positions(self, parsed, kwargs, orig_get_rope_index)
         ctx = _prepare_cp_local_context(parsed)
+        if packed is not None and ctx is not None and kwargs.get("position_ids") is None:
+            # Megatron-Bridge 2e09c234 refuses a CP-pre-sharded THD row unless its rank-local
+            # MRoPE positions come in as position_ids; it never calls get_rope_index then.
+            kwargs["position_ids"] = packed
         if packed is not None:
             _tls.packed_positions = packed
         if ctx is not None:
