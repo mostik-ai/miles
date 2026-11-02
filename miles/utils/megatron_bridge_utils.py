@@ -32,6 +32,12 @@ def patch_megatron_model(model):
             delattr(model_config, "share_embeddings_and_output_weights")
 
 
+def apply_cp_comm_type(provider, args) -> None:
+    """One --cp-comm-type is every layer's, which core_transformer_config_from_args passes as the type itself; a longer
+    list names each layer's."""
+    provider.cp_comm_type = args.cp_comm_type[0] if len(args.cp_comm_type) == 1 else args.cp_comm_type
+
+
 def apply_dsa_backend_args(provider, args) -> None:
     """Resolve DSV4 kernel selection separately from the GLM DSA backend option."""
     if getattr(provider, "experimental_attention_variant", None) == "dsv4_hybrid":
