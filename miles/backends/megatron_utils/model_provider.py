@@ -103,8 +103,9 @@ def _apply_bridge_runtime_config(provider, args: argparse.Namespace) -> None:
         provider.moe_aux_loss_coeff = args.moe_aux_loss_coeff
 
     # Imported here: test_bridge_mtp_detachment.py exec()s this function's AST in a bare namespace (no module names).
-    from miles.utils.megatron_bridge_utils import apply_dsa_backend_args
+    from miles.utils.megatron_bridge_utils import apply_cp_comm_type, apply_dsa_backend_args
 
+    apply_cp_comm_type(provider, args)
     apply_dsa_backend_args(provider, args)
 
 
