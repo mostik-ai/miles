@@ -13,8 +13,8 @@ from miles.backends.training_utils.data.rollout import DataIterator
 from miles.backends.training_utils.metrics import perf
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.flops_utils import fwd_tflops_per_gpu
-from miles.utils.function_registry import load_function
 from miles.utils.ft_utils.process_group_utils import MultiPGUtil
+from miles.utils.function_registry import load_function
 from miles.utils.metric_utils import compute_rollout_step, namespace_metrics, strip_metrics_namespace
 from miles.utils.tracking_utils import tracking
 from miles.utils.tracking_utils.structured_log import log_structured
