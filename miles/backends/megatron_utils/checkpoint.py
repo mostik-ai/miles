@@ -14,8 +14,9 @@ from megatron.core.utils import unwrap_model
 # TODO: may need to copy those 2 functions and do refactoring.
 from megatron.training.checkpointing import get_checkpoint_name
 from megatron.training.checkpointing import load_checkpoint as _load_checkpoint_megatron
-from megatron.training.checkpointing import save_checkpoint
+from megatron.training.checkpointing import save_checkpoint as _save_checkpoint_megatron
 from megatron.training.global_vars import get_args
+from torch.multiprocessing import reductions
 
 from miles.backends.megatron_utils.megatron_config import has_hf_checkpoint
 from miles.backends.training_utils.model_companion import (
@@ -169,6 +170,32 @@ def load_checkpoint(
     ModelCompanionSampleConsumptionUtils.clear_for_finetune(ddp_model, args=args)
 
     return _CheckpointLoadResult(iteration=result_iteration, restored_trained_iteration=restored_trained_iteration)
+
+
+def save_checkpoint(*args: Any, **kwargs: Any) -> None:
+    """Megatron's save_checkpoint, run with torch's own tensor reducers.
+
+    Weight updates apply SGLang's monkey_patch_torch_reductions and leave it on. Megatron's persistent async-save
+    worker never applies it, and an async save scheduled under it waits for that worker forever; Megatron puts
+    torch's reducers back only for the tensors it restages for CUDA IPC."""
+    with _torch_tensor_reducers():
+        _save_checkpoint_megatron(*args, **kwargs)
+
+
+@contextmanager
+def _torch_tensor_reducers():
+    if not hasattr(reductions, "_reduce_tensor_original"):
+        yield
+        return
+    patched = reductions.reduce_tensor, reductions.rebuild_cuda_tensor
+    reductions.reduce_tensor = reductions._reduce_tensor_original
+    reductions.rebuild_cuda_tensor = reductions._rebuild_cuda_tensor_original
+    reductions.init_reductions()
+    try:
+        yield
+    finally:
+        reductions.reduce_tensor, reductions.rebuild_cuda_tensor = patched
+        reductions.init_reductions()
 
 
 def save_checkpoint_with_lora(
