@@ -51,14 +51,14 @@ def build_gdn_cp_context(module: nn.Module, cu_seqlens: torch.Tensor, device: to
     return build_fla_cp_context(cu_seqlens, cp_group, module.conv_kernel_size, device)
 
 
-def _relayout_indices(cu_seqlens, cp_rank, cp_size, total):
+def _relayout_indices(cu_seqlens, cp_size, total):
     """Index maps between the two layouts of a ``total``-token packed stream, built on device.
 
     Rank ``r``'s zigzag shard holds, per sequence, chunks ``r`` and ``2 * cp_size - 1 - r`` of
     ``2 * cp_size`` equal chunks, or its contiguous ``1 / cp_size`` when the length is not a multiple of
-    ``2 * cp_size`` (the final padding). Returns ``(to_packed, to_zigzag)``: ``to_packed`` selects this
-    rank's contiguous shard from the rank-concatenated zigzag shards, ``to_zigzag`` selects this rank's
-    zigzag shard from the rank-concatenated contiguous shards (the packed stream itself)."""
+    ``2 * cp_size`` (the final padding). Returns ``(zigzag_position, packed_position)`` over the whole
+    stream: row ``p`` of the packed stream is row ``zigzag_position[p]`` of the rank-concatenated zigzag
+    shards, and ``packed_position`` is the inverse map."""
     cu = cu_seqlens.to(torch.int64)
     lengths = cu[1:] - cu[:-1]
     torch._assert_async(cu[-1] == total)
@@ -77,36 +77,52 @@ def _relayout_indices(cu_seqlens, cp_rank, cp_size, total):
     zigzag_position = owner * shard + start // cp_size + offset % chunk + mirrored * chunk
     packed_position = torch.empty_like(zigzag_position)
     packed_position[zigzag_position] = position
-    rows = slice(cp_rank * shard, (cp_rank + 1) * shard)
-    return zigzag_position[rows], packed_position[rows]
+    return zigzag_position, packed_position
 
 
-def _gather_select(x, index, cp_group):
-    gathered = x.new_empty((x.shape[0] * dist.get_world_size(group=cp_group), *x.shape[1:]))
-    dist.all_gather_into_tensor(gathered, x.contiguous(), group=cp_group)
-    return gathered.index_select(0, index)
+def _exchange(x, sources, cp_group, cp_rank):
+    """This rank's rows of a row permutation across the CP ranks, each holding ``n`` rows: row ``i`` of the
+    result is row ``sources[cp_rank * n + i]`` of the ranks' concatenated ``x``. Each rank sends another only
+    the rows it takes, in one all-to-all, instead of every rank gathering every row."""
+    n = x.shape[0]
+    cp_size = dist.get_world_size(group=cp_group)
+    owners = sources // n
+    sent = owners == cp_rank
+    takers = torch.arange(sources.numel(), device=sources.device)[sent] // n
+    taken = owners[cp_rank * n : (cp_rank + 1) * n]
+    received = torch.empty_like(x)
+    dist.all_to_all_single(
+        received,
+        x.index_select(0, sources[sent] % n),
+        torch.bincount(taken, minlength=cp_size).tolist(),
+        torch.bincount(takers, minlength=cp_size).tolist(),
+        group=cp_group,
+    )
+    rows = torch.empty_like(received)
+    rows[torch.argsort(taken, stable=True)] = received
+    return rows
 
 
 class _Relayout(torch.autograd.Function):
-    """All-gather over CP, then select this rank's rows; the gradient is the same with the inverse map."""
+    """A row permutation across CP by all-to-all; the gradient is the inverse permutation."""
 
     @staticmethod
-    def forward(ctx, x, index, inverse_index, cp_group):
-        ctx.cp_group = cp_group
-        ctx.save_for_backward(inverse_index)
-        return _gather_select(x, index, cp_group)
+    def forward(ctx, x, sources, inverse_sources, cp_group, cp_rank):
+        ctx.cp_group, ctx.cp_rank = cp_group, cp_rank
+        ctx.save_for_backward(inverse_sources)
+        return _exchange(x.contiguous(), sources, cp_group, cp_rank)
 
     @staticmethod
     def backward(ctx, grad_output):
-        (inverse_index,) = ctx.saved_tensors
-        return _gather_select(grad_output, inverse_index, ctx.cp_group), None, None, None
+        (inverse_sources,) = ctx.saved_tensors
+        return _exchange(grad_output.contiguous(), inverse_sources, ctx.cp_group, ctx.cp_rank), None, None, None, None
 
 
 def zigzag_to_packed_shard(hidden_states, cu_seqlens, cp_group, cp_rank, cp_size):
-    to_packed, to_zigzag = _relayout_indices(cu_seqlens, cp_rank, cp_size, hidden_states.size(0) * cp_size)
-    return _Relayout.apply(hidden_states, to_packed, to_zigzag, cp_group)
+    to_packed, to_zigzag = _relayout_indices(cu_seqlens, cp_size, hidden_states.size(0) * cp_size)
+    return _Relayout.apply(hidden_states, to_packed, to_zigzag, cp_group, cp_rank)
 
 
 def packed_shard_to_zigzag(hidden_states, cu_seqlens, cp_group, cp_rank, cp_size):
-    to_packed, to_zigzag = _relayout_indices(cu_seqlens, cp_rank, cp_size, hidden_states.size(0) * cp_size)
-    return _Relayout.apply(hidden_states, to_zigzag, to_packed, cp_group)
+    to_packed, to_zigzag = _relayout_indices(cu_seqlens, cp_size, hidden_states.size(0) * cp_size)
+    return _Relayout.apply(hidden_states, to_zigzag, to_packed, cp_group, cp_rank)
