@@ -40,7 +40,7 @@ from miles.utils.dp_schedule import TrainParallelConfig
 from miles.utils.environ import use_legacy_rollout_v1
 from miles.utils.function_registry import load_function
 from miles.utils.hf_utils.config import is_complete_hf_export
-from miles.utils.http_utils import init_http_client
+from miles.utils.http_utils import close_rollout_client, init_http_client
 from miles.utils.init_once import InitOnce, init_once
 from miles.utils.logging_utils import configure_logger
 from miles.utils.metric_checker import MetricChecker
@@ -164,6 +164,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                 self._metric_checker.dispose()
             if isinstance(self.eval_generate_rollout, CheckpointEvalFn):
                 await maybe_await(self.eval_generate_rollout.dispose())
+            await close_rollout_client()
         finally:
             # Ray kills this actor when the job ends, so its trackers must send the last eval they still buffer first
             finish_tracking()
