@@ -47,6 +47,9 @@ def write_checkpoint_dir(
 
     write_error = None
     try:
+        # Rank 0's directory may not be visible on another node's filesystem view (a Modal Volume mounted per
+        # container), and every rank writes its own shards into it
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
         write_shards(checkpoint_dir)
     except Exception as exc:
         write_error = exc

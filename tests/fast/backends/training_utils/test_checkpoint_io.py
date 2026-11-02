@@ -44,3 +44,19 @@ def test_crashed_overwrite_leaves_no_metadata(tmp_path, crash_after_write):
     assert (checkpoint / "value").read_text() == "retry"
     assert (checkpoint / "META.json").exists()
     assert list(tmp_path.iterdir()) == [checkpoint]
+
+
+def test_every_rank_creates_the_directory_it_writes_into(tmp_path, monkeypatch):
+    # A rank other than 0 does not see rank 0's directory when each node mounts the storage on its own; it must
+    # create the directory before writing its shard into it.
+    import miles.backends.training_utils.checkpoint.io as io
+
+    checkpoint = tmp_path / "checkpoint"
+    monkeypatch.setattr(io.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(io.dist, "get_rank", lambda: 8)
+    monkeypatch.setattr(io.dist, "get_world_size", lambda: 1)
+    monkeypatch.setattr(io.dist, "broadcast_object_list", lambda objects, src, group: None)
+    monkeypatch.setattr(io.dist, "all_gather_object", lambda out, value, group: out.__setitem__(0, value))
+    monkeypatch.setattr(io, "get_gloo_group", lambda: None)
+    write_checkpoint_dir(checkpoint, lambda directory: (directory / "adapter_megatron_rank8.pt").write_text("shard"))
+    assert (checkpoint / "adapter_megatron_rank8.pt").read_text() == "shard"
