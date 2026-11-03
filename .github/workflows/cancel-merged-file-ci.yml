@@ -11,7 +11,7 @@ permissions:
 jobs:
   cancel-file-runs:
     if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 5
     steps:
       - name: Check out the trusted cancellation handler

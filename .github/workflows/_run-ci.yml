@@ -48,7 +48,7 @@ on:
 jobs:
   plan:
     if: ${{ !inputs.plan_already_resolved }}
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     permissions:
       contents: read
     outputs:

@@ -31,7 +31,7 @@ permissions:
 
 jobs:
   authorize:
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 5
     steps:
       - name: Require the default branch
@@ -63,7 +63,7 @@ jobs:
 
   execute:
     needs: authorize
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 15
     steps:
       - name: Check out the executor

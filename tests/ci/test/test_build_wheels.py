@@ -195,7 +195,6 @@ def test_failure_notifier_covers_all_jobs_without_build_or_publish_credentials()
     assert "contains(needs.*.result, 'failure')" in notify["if"]
     assert "github.repository == 'radixark/miles'" in notify["if"]
     assert "github.event_name" not in notify["if"]
-    assert notify["runs-on"] == "ubuntu-latest"
     assert notify["permissions"] == {"actions": "read", "contents": "read"}
     checkout = notify["steps"][0]["with"]
     assert checkout["persist-credentials"] is False

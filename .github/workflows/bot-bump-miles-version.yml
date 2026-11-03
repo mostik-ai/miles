@@ -19,7 +19,7 @@ permissions:
 jobs:
   bump-version:
     if: github.repository == 'radixark/miles'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     steps:
       - name: Checkout code
         uses: actions/checkout@v4

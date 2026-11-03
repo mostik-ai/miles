@@ -200,7 +200,7 @@ The registration parser in `tests/ci/ci_register.py` requires domain labels for 
 
 ## `tests/fast/` auto-registers as CPU
 
-Each `test_*.py` under `tests/fast/` without an explicit registration is auto-registered as a CPU test (backend CPU, suite `stage-a-cpu`, `labels=[]`), and runs on the GitHub-hosted `ubuntu-latest` runner. Files exceeding the budget above need an explicit `register_cpu_ci(...)` with their estimate, suite, and domain labels. Here "CPU" is the hardware backend, not a label. A `register_cuda_ci()` under `tests/fast/` is a hard error — move it to `tests/fast-gpu/`.
+Each `test_*.py` under `tests/fast/` without an explicit registration is auto-registered as a CPU test (backend CPU, suite `stage-a-cpu`, `labels=[]`), and runs on the GitHub-hosted `mostik-linux-32core` runner. Files exceeding the budget above need an explicit `register_cpu_ci(...)` with their estimate, suite, and domain labels. Here "CPU" is the hardware backend, not a label. A `register_cuda_ci()` under `tests/fast/` is a hard error — move it to `tests/fast-gpu/`.
 
 ## `bypass-fastfail`: opt out of fast-fail
 

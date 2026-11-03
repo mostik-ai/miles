@@ -154,7 +154,7 @@ def test_gpu_workflow_requires_a_successful_hosted_plan(workflow):
     jobs = yaml.safe_load((ROOT / ".github/workflows" / workflow).read_text())["jobs"]
     plan, run = jobs["plan"], jobs["run"]
 
-    assert plan["runs-on"] == "ubuntu-latest"
+    assert plan["runs-on"] == "mostik-linux-32core"
     assert "container" not in plan
     assert plan["permissions"] == {"contents": "read"}
     assert plan["outputs"]["has_tests"] == "${{ steps.select.outputs.has_tests }}"

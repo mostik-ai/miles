@@ -18,7 +18,7 @@ jobs:
   # reuse the image instead of paying for an identical build.
   docker-decide:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       needs_image: ${{ steps.decide.outputs.needs_image }}
       rebuild: ${{ steps.decide.outputs.rebuild }}
@@ -137,7 +137,7 @@ jobs:
   docker-build:
     needs: [docker-decide]
     if: always() && !cancelled() && github.event.action != 'closed'
-    runs-on: ${{ fromJSON(needs.docker-decide.outputs.rebuild == 'true' && github.event.pull_request.head.repo.full_name == github.repository && '["docker-build"]' || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(needs.docker-decide.outputs.rebuild == 'true' && github.event.pull_request.head.repo.full_name == github.repository && '["docker-build"]' || '["mostik-linux-32core"]') }}
     # The fork job waits for a separately queued builder, whose own limit is 180m.
     timeout-minutes: ${{ needs.docker-decide.outputs.rebuild == 'true' && github.event.pull_request.head.repo.full_name != github.repository && 360 || 180 }}
     outputs:

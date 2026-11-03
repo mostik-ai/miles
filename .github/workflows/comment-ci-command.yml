@@ -20,7 +20,7 @@ jobs:
     outputs:
       capability: ${{ steps.authorize.outputs.capability }}
       success_reaction: ${{ steps.authorize.outputs.success_reaction }}
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 5
     steps:
       - name: Check out the trusted handler and policy
@@ -89,7 +89,7 @@ jobs:
       contents: read
       actions: write
       pull-requests: read
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 5
     steps:
       - name: Check out the trusted handler and policy
@@ -120,7 +120,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 5
     steps:
       - name: Check out the trusted handler

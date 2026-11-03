@@ -78,7 +78,7 @@ concurrency:
 jobs:
   resolve-ci-policy:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       cadence: ${{ steps.resolve.outputs.cadence }}
       raw_labels: ${{ steps.resolve.outputs.raw_labels }}
@@ -117,7 +117,7 @@ jobs:
   resolve-ci-image:
     needs: [resolve-ci-policy]
     if: ${{ !contains(fromJSON(needs.resolve-ci-policy.outputs.skipped_stages || '[]'), 'stage-c-4-gpu-mi350') }}
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       container_image: ${{ steps.resolve.outputs.container_image }}
     steps:
@@ -138,7 +138,7 @@ jobs:
 
   resolve-ci-deps:
     if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       skip_dependency_install: ${{ steps.resolve.outputs.skip_dependency_install }}
     steps:

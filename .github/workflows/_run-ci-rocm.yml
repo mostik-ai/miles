@@ -33,7 +33,7 @@ on:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     permissions:
       contents: read
     outputs:

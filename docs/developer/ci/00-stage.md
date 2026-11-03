@@ -18,8 +18,8 @@ Stage names follow `stage-<tier>-<gpus>-<hw>` (or `stage-<tier>-<hw>` for CPU, e
 
 | Stage / suite | Hardware | Runner labels (`runs_on`) | Shards | Depends on |
 |---|---|---|---|---|
-| `stage-a-cpu` | GitHub-hosted CPU | — (`ubuntu-latest`) | 4 | `resolve-ci-policy` |
-| `stage-b-cpu` | GitHub-hosted CPU | — (`ubuntu-latest`) | 4 | `resolve-ci-policy`, `stage-a-cpu` |
+| `stage-a-cpu` | GitHub-hosted CPU | — (`mostik-linux-32core`) | 4 | `resolve-ci-policy` |
+| `stage-b-cpu` | GitHub-hosted CPU | — (`mostik-linux-32core`) | 4 | `resolve-ci-policy`, `stage-a-cpu` |
 | `stage-b-2-gpu-h200` | 2× H200 | `["h200","2gpu"]` | 2 | both resolvers, `stage-a-cpu` |
 | `stage-c-2-gpu-h200` | 2× H200 | `["h200","2gpu"]` | 4 | both resolvers, `stage-a-cpu` |
 | `stage-c-4-gpu-h200` | 4× H200 | `["h200","4gpu"]` | 9 | both resolvers, `stage-a-cpu` |
@@ -48,7 +48,7 @@ Both PR workflows expose reusable `workflow_call` entry points. Release CI calls
 
 ## What each stage does
 
-**Image resolution (`resolve-ci-image`).** In `pr-test.yml`, a small `ubuntu-latest` job selects, in order: the called workflow's `image_tag`, the `ci_image_tag` dispatch input, a current `pr-<num>` image, the PR description's `ci-image-tag:`, then `dev`. It validates the result is a bare tag and outputs `radixark/miles:<tag>`. `release-branch-cut.yml` passes the prune-exempt `release-vX.Y.Z-ci` tag recorded in `release-lock.json`.
+**Image resolution (`resolve-ci-image`).** In `pr-test.yml`, a small `mostik-linux-32core` job selects, in order: the called workflow's `image_tag`, the `ci_image_tag` dispatch input, a current `pr-<num>` image, the PR description's `ci-image-tag:`, then `dev`. It validates the result is a bare tag and outputs `radixark/miles:<tag>`. `release-branch-cut.yml` passes the prune-exempt `release-vX.Y.Z-ci` tag recorded in `release-lock.json`.
 
 The ROCm resolver uses only its dispatch input, defaults to its undated `rocm/sgl-dev` tag, and uses that default for reusable calls too. For PRs, it runs only when `stage-c-4-gpu-mi350` is selected. CPU-only PRs skip both CUDA image preparation and ROCm image resolution.
 
@@ -69,11 +69,11 @@ A **nightly** policy selects every enabled tag except `long` and `ft-long`, admi
 
 **PR GPU stage selection.** Before runner allocation, PR GPU stages are filtered by `runnable ∩ affected`: `runnable` reuses cadence/label selection, while `affected` maps changed registered tests to their suites. Known non-GPU paths affect none; unknown, missing, or malformed diffs affect all. `nightly`, `run-ci-all`, and `run-ci-image` add their runnable stages; `bypass-fastfail` does not. This path-based filter does not apply to CPU stages or scheduled/manual runs.
 
-**Empty GPU jobs.** B200 uses `b200_plan.py` to select individual files and their minimum GPU budgets. Other CUDA and ROCm suite jobs first run their exact `--list-only` command on `ubuntu-latest`, including cadence, labels, arch dispatch, disabled tests, and partition arguments. `--github-output` publishes `has_tests` after partitioning. Only a successful plan with `has_tests=true` can allocate a GPU runner, which checks out the planned commit. Empty suites and shards skip GPU execution; planning errors fail the workflow. `/rerun-test` instead uses its existing trusted resolver, which requires one enabled registration at the exact requested SHA.
+**Empty GPU jobs.** B200 uses `b200_plan.py` to select individual files and their minimum GPU budgets. Other CUDA and ROCm suite jobs first run their exact `--list-only` command on `mostik-linux-32core`, including cadence, labels, arch dispatch, disabled tests, and partition arguments. `--github-output` publishes `has_tests` after partitioning. Only a successful plan with `has_tests=true` can allocate a GPU runner, which checks out the planned commit. Empty suites and shards skip GPU execution; planning errors fail the workflow. `/rerun-test` instead uses its existing trusted resolver, which requires one enabled registration at the exact requested SHA.
 
 **Dependencies / gating.** In `pr-test.yml`, `stage-a-cpu` requires only `resolve-ci-policy`; all four `stage-b-cpu` shards additionally wait for every `stage-a-cpu` shard to succeed. PR-image preparation requires selected CUDA tests and the `stage-a-cpu` success/bypass gate; NVIDIA GPU stages follow image resolution. `stage-b-cpu` does not gate that chain and is skipped if `stage-a-cpu` fails, including with `bypass-fastfail` or broad cadences. Resolved nightly, weekly, or release cadence and the `bypass-fastfail` PR label admit the chain after an actual `stage-a-cpu` failure and make each suite continue after a test failure. This fast-fail exception does not itself select GPU tests or bypass policy or Docker/image failure; cadence and labels determine selection as described above. Scheduled, manual, and called release runs retain their existing image preparation.
 
-**Runner selection.** CUDA stages request runners by label via `runs_on`, a JSON list passed through to `runs-on` — a runner must carry **all** listed labels (GPU class + count). CPU stages call `_run-cpu-ci.yml`, whose only job runs on GitHub-hosted `ubuntu-latest`, so they don't occupy GPU-fleet slots.
+**Runner selection.** CUDA stages request runners by label via `runs_on`, a JSON list passed through to `runs-on` — a runner must carry **all** listed labels (GPU class + count). CPU stages call `_run-cpu-ci.yml`, whose only job runs on GitHub-hosted `mostik-linux-32core`, so they don't occupy GPU-fleet slots.
 
 **NVSHMEM on RoCE-only runners.** When the job container sees HCAs and all of them have link layer `Ethernet` (RoCE), `_run-ci.yml` sets `NVSHMEM_HCA_LIST` to a NIC name that matches nothing before any test command runs. NVSHMEM then skips its IB transports at init, and DeepEP keeps its intra-node traffic on NVLink. Runners with an InfiniBand HCA keep NVSHMEM's RDMA transports. The override relies on every CUDA stage being single-node; a multi-node stage on RoCE runners must not inherit it.
 

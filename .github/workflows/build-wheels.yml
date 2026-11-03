@@ -62,7 +62,7 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       router_matrix: ${{ steps.check.outputs.router_matrix }}
       publish_matrix: ${{ steps.check.outputs.publish_matrix }}
@@ -147,8 +147,8 @@ jobs:
           fi
 
           ROUTER_MATRIX=$(jq -cn --argjson x "$ROUTER_X86" --argjson a "$ROUTER_ARM64" '[
-            (if $x then {arch: "x86_64", build_arch: "x86", runner: "ubuntu-24.04"} else empty end),
-            (if $a then {arch: "aarch64", build_arch: "aarch64", runner: "ubuntu-24.04-arm"} else empty end)]')
+            (if $x then {arch: "x86_64", build_arch: "x86", runner: "mostik-linux-32core"} else empty end),
+            (if $a then {arch: "aarch64", build_arch: "aarch64", runner: "mostik-linux-arm64-32core"} else empty end)]')
           X86_ANY=false
           if [ "$ROUTER_X86" = true ] || [ "$INT4_X86" = true ] || [ "$TE_X86" = true ]; then X86_ANY=true; fi
           PUBLISH_MATRIX=$(jq -cn --argjson x "$X86_ANY" --argjson a "$ROUTER_ARM64" '[
@@ -329,7 +329,7 @@ jobs:
       fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.check.outputs.publish_matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     env:
       CUDA: ${{ needs.check.outputs.cuda }}
       TORCH: ${{ needs.check.outputs.torch }}
@@ -376,7 +376,7 @@ jobs:
     if: >-
       always() && github.repository == 'radixark/miles' &&
       contains(needs.*.result, 'failure')
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 10
     permissions:
       actions: read

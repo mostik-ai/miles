@@ -23,7 +23,13 @@ from datetime import datetime, timedelta, timezone
 
 # Labels to skip when grouping runners (GitHub default labels)
 DEFAULT_LABELS_TO_IGNORE = {"self-hosted", "Linux", "X64", "ARM64"}
-GITHUB_HOSTED_LABELS = {"ubuntu-latest", "ubuntu-22.04", "ubuntu-24.04"}
+GITHUB_HOSTED_LABELS = {
+    "ubuntu-latest",
+    "ubuntu-22.04",
+    "ubuntu-24.04",
+    "mostik-linux-32core",
+    "mostik-linux-arm64-32core",
+}
 
 # Human-facing job outcome buckets, in display order, with emoji.
 STATUS_ORDER = ("pass", "fail", "cancel", "running", "queued")

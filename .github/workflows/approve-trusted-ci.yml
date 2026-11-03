@@ -18,7 +18,7 @@ jobs:
     if: >-
       github.event.pull_request.head.repo.full_name != github.repository &&
       contains(join(github.event.pull_request.labels.*.name, ' '), 'run-ci')
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     steps:
       - name: Approve held runs on the PR head
         env:

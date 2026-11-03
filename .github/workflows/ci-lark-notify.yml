@@ -37,7 +37,7 @@ jobs:
       contents: read
       actions: write  # rerun-failed-jobs on the first nightly attempt
       id-token: write
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 15
     steps:
       - name: Check out the trusted notifier, prompt, and policy

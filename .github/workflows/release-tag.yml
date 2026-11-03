@@ -34,7 +34,7 @@ permissions:
 jobs:
   create-tag:
     if: github.repository == 'radixark/miles'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     steps:
       - name: Validate version format
         env:

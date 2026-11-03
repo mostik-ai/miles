@@ -34,7 +34,7 @@ permissions:
 jobs:
   cut-release-branch:
     if: github.repository == 'radixark/miles'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       branch_name: ${{ github.event.inputs.branch_name }}
       ci_image_tag: ${{ steps.freeze.outputs.ci_image_tag }}
@@ -162,7 +162,7 @@ jobs:
   report-ci-status:
     needs: [cut-release-branch, run-tests-cuda]
     if: always() && needs.cut-release-branch.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     steps:
       - name: Post release-ci commit status on the tested SHA
         env:

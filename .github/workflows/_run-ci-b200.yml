@@ -45,7 +45,7 @@ concurrency:
 
 jobs:
   plan:
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       has_tests: ${{ steps.plan.outputs.has_tests }}

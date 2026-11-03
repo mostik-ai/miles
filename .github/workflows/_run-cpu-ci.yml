@@ -21,10 +21,10 @@ on:
         required: false
 
 jobs:
-  # CPU-only path: GitHub-hosted ubuntu-latest, bare pip install.
+  # CPU-only path: GitHub-hosted mostik-linux-32core, bare pip install.
   # Used for fast CPU tests so they don't occupy GPU-fleet runner slots.
   run-cpu:
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     timeout-minutes: 60
     env:
       SGLANG_SOURCE_ROOT: ${{ github.workspace }}/sglang/python

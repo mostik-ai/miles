@@ -10,7 +10,7 @@ permissions:
 jobs:
   delete-pr-tag:
     if: github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: mostik-linux-32core
     steps:
       - shell: bash
         run: |
