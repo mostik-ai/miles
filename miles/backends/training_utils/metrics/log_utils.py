@@ -188,7 +188,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
         max_seq_lens = rollout_data.get("max_seq_lens", None)
         # per-rollout-mean count share: num_rollouts / dp (None = legacy local count)
         rollout_count_share = None
-        if (num_rollouts := rollout_data.get("num_rollouts")) is not None:
+        if (num_rollouts := rollout_data.get("num_rollouts")) is not None and not args.skip_zero_advantage_samples:
             rollout_count_share = sum(num_rollouts) / parallel_state.effective_dp.size
 
         for key, val in rollout_data.items():

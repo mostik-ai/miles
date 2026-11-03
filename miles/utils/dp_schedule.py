@@ -24,6 +24,11 @@ class TrainParallelConfig(FrozenStrictBaseModel):
     independent_dp: bool
     supports_precomputed_schedule: bool
 
+    @property
+    def micro_batch_alignment(self) -> int:
+        """Each step's micro-batch count is a multiple of this, to divide evenly across DP and VPP."""
+        return self.dp_size * (self.microbatch_group_size_per_vp_stage if (self.vpp_size or 1) > 1 else 1)
+
 
 class DPSchedule(NamedTuple):
     partitions: list[list[int]]  # (num_ranks, num_local_samples): global sample indices
@@ -52,8 +57,7 @@ def build_dp_schedule(
     vpp_size = train_parallel_config.vpp_size or 1
     mb_group = train_parallel_config.microbatch_group_size_per_vp_stage
 
-    # micro-batch size per step must divide evenly across dp and vpp
-    align_to = dp_size * (mb_group if vpp_size > 1 else 1)
+    align_to = train_parallel_config.micro_batch_alignment
 
     max_per_bin = None
     if args.use_dynamic_batch_size:
