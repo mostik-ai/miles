@@ -188,6 +188,16 @@ def compute_trainer_num_cells(args, *, role: str) -> int:
     return (total_gpus // compute_megatron_world_size_except_dp(args)) if args.indep_dp else 1
 
 
+def _trainer_worker_class(args, config: MegatronTrainerConfig) -> str:
+    if config.role != ACTOR_ROLE:
+        return _TRAINER_ACTOR_CLASSES[args.train_backend]
+    if args.custom_trainer_actor_path is not None:
+        return args.custom_trainer_actor_path
+    if args.train_backend == "megatron" and is_multi_lora_enabled(args):
+        return "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
+    return _TRAINER_ACTOR_CLASSES[args.train_backend]
+
+
 def _compute_spec_trainer(
     args,
     *,
@@ -224,11 +234,7 @@ def _compute_spec_trainer(
             pg_name="actor",
             pg_slot_offset=pg_slot_offset,
         ),
-        worker_class=(
-            "miles.backends.megatron_utils.lora.actor.MultiLoRATrainRayActor"
-            if args.train_backend == "megatron" and config.role == ACTOR_ROLE and is_multi_lora_enabled(args)
-            else _TRAINER_ACTOR_CLASSES[args.train_backend]
-        ),
+        worker_class=_trainer_worker_class(args, config),
         ctor_kwargs=lambda ctx: dict(
             args=args,
             world_size=gpus_per_cell,
