@@ -455,11 +455,11 @@ class MegatronTrainRayActor(TrainRayActor):
             if self.args.update_weights_interval == 1:
                 self.weights_backuper.backup("rollout_actor")
 
-    def _finalize_pending_async_save(self) -> None:
+    def _finalize_pending_async_save(self, blocking: bool = True) -> None:
         if not self.args.async_save:
             return
 
-        maybe_finalize_async_save(blocking=True)
+        maybe_finalize_async_save(blocking=blocking)
 
     @with_logs
     @timer
@@ -607,6 +607,9 @@ class MegatronTrainRayActor(TrainRayActor):
         self._last_rollout_id = rollout_id
         if self.args.offload_train and self._asleep:
             self.wake_up()
+        # a background save becomes the checkpoint a resume loads only once finalized; left to the next save, a lost
+        # node would resume a whole save interval further back
+        self._finalize_pending_async_save(blocking=False)
 
         with ExitStack() as stack:
             with timer("data_preprocess"):
