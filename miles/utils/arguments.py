@@ -1817,6 +1817,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--skip-zero-advantage-samples",
+                action="store_true",
+                default=False,
+                help=(
+                    "Leave samples whose advantage is exactly zero out of training. They add exactly zero gradient, "
+                    "so the update stays the same, up to rounding, while the trainer computes less: the loss still "
+                    "divides by the whole batch, and an all-zero batch still steps the optimizer on the shortest "
+                    "samples. Training metrics, tokens/s, TFLOPs and MFU then cover only the samples computed."
+                ),
+            )
+            parser.add_argument(
                 "--skip-actor-forward-only",
                 action="store_true",
                 default=False,
@@ -4217,6 +4228,9 @@ def miles_validate_args(args):
     if args.skip_actor_forward_only:
         validate_skip_actor_forward_only(args)
 
+    if args.skip_zero_advantage_samples:
+        validate_skip_zero_advantage_samples(args)
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -4228,6 +4242,42 @@ def miles_validate_args(args):
         raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
 
     _validate_deploy_component(args)
+
+
+def validate_skip_zero_advantage_samples(args) -> None:
+    """A sample with a zero advantage adds nothing to the update only if the policy gradient alone reads it. Beyond what
+    --skip-actor-forward-only refuses, which covers random draws and routing that read a whole micro-batch, refuses every
+    other term and normalization that would read a skipped sample."""
+    option = "--skip-zero-advantage-samples"
+    assert args.skip_actor_forward_only, f"{option} requires --skip-actor-forward-only"
+    assert args.advantage_estimator == "grpo", f"{option} only supports --advantage-estimator grpo"
+    assert args.use_dynamic_batch_size, f"{option} requires --use-dynamic-batch-size"
+    assert (
+        args.rollout_batch_size * args.n_samples_per_prompt == args.global_batch_size
+    ), f"{option} requires one optimizer step per rollout batch"
+
+    incompatible_options = [
+        name
+        for name, enabled in (
+            ("--entropy-coef", args.entropy_coef != 0),
+            ("--use-kl-loss", args.use_kl_loss),
+            ("--normalize-advantages", args.normalize_advantages),
+            ("--calculate-per-token-loss", args.calculate_per_token_loss),
+            ("--custom-loss-function-path", args.custom_loss_function_path is not None),
+            ("--custom-pg-loss-reducer-function-path", args.custom_pg_loss_reducer_function_path is not None),
+            ("--custom-tis-function-path", args.custom_tis_function_path is not None),
+            ("--rollout-data-postprocess-path", args.rollout_data_postprocess_path is not None),
+            ("--enable-mtp-training", args.enable_mtp_training),
+            ("--moe-aux-loss-coeff", args.moe_aux_loss_coeff not in (None, 0, [0])),
+            ("--moe-z-loss-coeff", args.moe_z_loss_coeff not in (None, 0, [0])),
+            ("--moe-expert-capacity-factor", args.moe_expert_capacity_factor is not None),
+            ("--moe-router-enable-expert-bias", args.moe_router_enable_expert_bias),
+            ("--enable-sample-ownership-checker", args.enable_sample_ownership_checker),
+            ("--delay-split-train-data-by-dp", args.delay_split_train_data_by_dp),
+        )
+        if enabled
+    ]
+    assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
 
 
 def validate_skip_actor_forward_only(args) -> None:
