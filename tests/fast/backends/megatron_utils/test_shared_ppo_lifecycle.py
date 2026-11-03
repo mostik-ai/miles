@@ -278,6 +278,8 @@ def test_every_save_hands_megatron_the_same_context_for_its_save_plan(actor_modu
     worker._save_context = {}
     save = Mock()
     monkeypatch.setattr(actor_module, "save", save)
+    monkeypatch.setattr(actor_module, "maybe_finalize_async_save", Mock())
+    monkeypatch.setattr(actor_module, "log_checkpoint_save", Mock())
 
     worker.save_model(6)
     worker.save_model(16)
