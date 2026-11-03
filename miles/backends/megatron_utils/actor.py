@@ -241,6 +241,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self._asleep = False
         self._grad_buffer_paused = False
+        self._save_context: dict = {}  # holds Megatron's save plan between saves
 
         if role == "critic":
             load_output = self._load_state_core(
@@ -871,6 +872,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.model,
             self.optimizer,
             self.opt_param_scheduler,
+            checkpointing_context=self._save_context,
             snapshot_publisher=self.snapshot_publisher,
         )
 
