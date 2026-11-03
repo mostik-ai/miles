@@ -31,6 +31,7 @@ from miles.ray.specs.train import (
 )
 from miles.ray.train.group import TrainerController
 from miles.ray.train_actor import TrainRayActor
+from miles.utils.args.custom_function import CustomFunctionConfig
 from miles.utils.args.runtime import AllConfig
 from miles.utils.args.trainer_utils import compute_trainer_config
 from miles.utils.external_utils.command_utils.helm_backend.launcher.values.builder import (
@@ -38,6 +39,7 @@ from miles.utils.external_utils.command_utils.helm_backend.launcher.values.build
     compute_static_connections,
 )
 from miles.utils.external_utils.command_utils.helm_backend.launcher.values.misc import SECTION_OF_CATEGORY, LaunchPlan
+from miles.utils.function_registry import function_registry
 from miles.utils.workers.rpc.common.metadata import _find_rpc_config, declared_concurrency_groups
 from miles.utils.workers.serving.utils import parse_serve_worker_config
 from miles.utils.workers.types import DeployComponent, PlatformAccess
@@ -286,6 +288,36 @@ class TestConstructorArguments:
         assert [spec.worker_class for spec in critic_specs] == [
             train_specs._TRAINER_ACTOR_CLASSES[backend]
         ] * use_critic
+
+    def test_a_custom_trainer_actor_runs_the_actor_workers_but_not_the_critic(self):
+        """A run can bring its own actor trainer class; the critic still runs the backend's."""
+        actor_spec, critic_spec = specs_trainer(
+            _make_args(
+                custom_trainer_actor_path=CustomFunctionConfig(path="my_package.my_actor.MyTrainRayActor"),
+                use_critic=True,
+            )
+        )
+
+        assert actor_spec.worker_class == "my_package.my_actor.MyTrainRayActor"
+        assert critic_spec.worker_class == train_specs._TRAINER_ACTOR_CLASSES["megatron"]
+
+    def test_a_custom_trainer_actor_gets_the_arguments_it_declares(self):
+        """The actor class declares its own arguments as a custom function does, and its workers get their values."""
+
+        class ActorWithOwnArguments:
+            @staticmethod
+            def add_arguments(parser):
+                parser.add_argument("--my-actor-setting", required=True)
+                return parser
+
+        with function_registry.temporary("my_actor", ActorWithOwnArguments):
+            args = parse_megatron_test_config(
+                "--actor-num-gpus-per-node", "4", "--custom-trainer-actor-path", "my_actor", "--my-actor-setting", "on"
+            )
+            (actor_spec,) = specs_trainer(replace_config_values(args, **_TRAINER_TEST_DEFAULTS))
+
+        assert actor_spec.worker_class == "my_actor"
+        assert actor_spec.args.custom_trainer_actor_path.config.my_actor_setting == "on"
 
 
 class TestConcurrencyGroups:

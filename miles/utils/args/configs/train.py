@@ -149,6 +149,17 @@ class TrainConfig(BaseConfig):
             ),
         ),
     ] = None
+    custom_trainer_actor_path: A[
+        CustomFunctionConfig | None,
+        Arg(
+            help=(
+                "Dotted path of the Ray actor class that runs each actor trainer worker, instead of the train "
+                "backend's own class; the critic keeps the backend's class. Like the custom function options, "
+                "the class may declare its own arguments, which its workers read from this option's config. "
+                "Example: 'my_package.my_actor.MyTrainRayActor'."
+            ),
+        ),
+    ] = None
     recompute_loss_function: A[
         bool,
         Arg(help="Whether to enable recompute loss function to save memory during training."),
