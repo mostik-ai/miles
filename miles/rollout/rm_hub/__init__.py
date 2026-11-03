@@ -22,6 +22,8 @@ async def remote_rm(args, sample: Sample):
         "label": sample.label,
     }
     session_kwargs = {}
+    if args.rm_timeout is not None:
+        session_kwargs["timeout"] = aiohttp.ClientTimeout(total=args.rm_timeout)
     async with aiohttp.ClientSession(**session_kwargs) as session:
         async with session.post(args.rm_url, json=payload) as resp:
             resp.raise_for_status()
