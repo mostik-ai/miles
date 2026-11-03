@@ -364,6 +364,8 @@ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
     if total_groups > 0:
         log_dict["zero_std/all_zero_percentage"] = sum(1 for reward in uniform_rewards if reward == 0) / total_groups
         log_dict["zero_std/all_one_percentage"] = sum(1 for reward in uniform_rewards if reward == 1) / total_groups
+        uniform_tokens = sum(len(sample.tokens) for group in interesting_sample_groups for sample in group)
+        log_dict["zero_std/token_percentage"] = uniform_tokens / max(sum(len(s.tokens) for s in all_samples), 1)
 
     return log_dict
 

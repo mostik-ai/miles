@@ -153,6 +153,20 @@ class TestComputeZeroStdMetrics:
         assert out["zero_std/all_zero_percentage"] == pytest.approx(1 / 3)
         assert out["zero_std/all_one_percentage"] == pytest.approx(1 / 3)
 
+    def test_the_token_share_weighs_uniform_groups_by_their_tokens(self):
+        args = make_args(advantage_estimator="grpo", reward_key=None)
+        samples = [
+            make_sample(group_index=0, reward=1, response_length=30),
+            make_sample(group_index=0, reward=1, response_length=30),
+            make_sample(group_index=1, reward=1, response_length=10),
+            make_sample(group_index=1, reward=0, response_length=10),
+        ]
+
+        out = _compute_zero_std_metrics(args, samples)
+
+        tokens = [len(sample.tokens) for sample in samples]
+        assert out["zero_std/token_percentage"] == pytest.approx(sum(tokens[:2]) / sum(tokens))
+
     def test_mixed_numeric_types_and_unequal_group_sizes_count_groups_equally(self):
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = [
@@ -201,7 +215,11 @@ class TestComputeZeroStdMetrics:
         args = make_args(advantage_estimator="grpo", reward_key=None)
         samples = make_samples_grouped(2, 4, rewards=[0.0, 0.5, 1.0, 0.7, 0.2, 0.8, 0.3, 0.6])
         out = _compute_zero_std_metrics(args, samples)
-        assert out == {"zero_std/all_zero_percentage": 0.0, "zero_std/all_one_percentage": 0.0}
+        assert out == {
+            "zero_std/all_zero_percentage": 0.0,
+            "zero_std/all_one_percentage": 0.0,
+            "zero_std/token_percentage": 0.0,
+        }
 
     def test_grpo_zero_std_groups_produce_bucket_counts_and_percentages(self):
         """1 group all-1, 1 group all-0, 1 group mixed → bucket counts plus the
