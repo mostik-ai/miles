@@ -290,6 +290,15 @@ class TestConstructorArguments:
         assert actor_spec.worker_class == actor_class
         assert critic_spec.worker_class == train_specs._TRAINER_ACTOR_CLASSES[backend]
 
+    def test_a_custom_trainer_actor_runs_the_actor_workers_but_not_the_critic(self):
+        """A run can bring its own actor trainer class; the critic still runs the backend's."""
+        actor_spec, critic_spec = specs_trainer(
+            _make_args(custom_trainer_actor_path="my_package.my_actor.MyTrainRayActor", use_critic=True)
+        )
+
+        assert actor_spec.worker_class == "my_package.my_actor.MyTrainRayActor"
+        assert critic_spec.worker_class == train_specs._TRAINER_ACTOR_CLASSES["megatron"]
+
 
 class TestConcurrencyGroups:
     def test_the_heartbeat_rpc_is_always_isolated(self):

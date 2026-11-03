@@ -601,6 +601,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--custom-trainer-actor-path",
+                type=str,
+                default=None,
+                help=(
+                    "Dotted path of the Ray actor class that runs each actor trainer worker, instead of the train "
+                    "backend's own class; the critic keeps the backend's class. "
+                    "Example: 'my_package.my_actor.MyTrainRayActor'."
+                ),
+            )
+            parser.add_argument(
                 "--recompute-loss-function",
                 action="store_true",
                 help="Whether to enable recompute loss function to save memory during training.",
