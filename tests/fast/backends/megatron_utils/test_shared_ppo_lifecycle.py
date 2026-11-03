@@ -76,7 +76,9 @@ def actor_module():
 
 def _worker(actor_module, role, *, asleep=True):
     worker = object.__new__(actor_module.MegatronTrainRayActor)
-    worker.args = Namespace(offload_train=True, debug_rollout_only=False, enable_sample_ownership_checker=False)
+    worker.args = Namespace(
+        offload_train=True, debug_rollout_only=False, async_save=False, enable_sample_ownership_checker=False
+    )
     worker.role = role
     worker._asleep = asleep
     worker._heartbeat = Mock()
@@ -337,6 +339,7 @@ def test_update_weights_only_uses_temporary_process_groups_when_asleep(actor_mod
 
     worker = object.__new__(actor_module.MegatronTrainRayActor)
     worker.args = Namespace(
+        async_save=False,
         debug_rollout_only=False,
         debug_skip_weight_update=True,
         debug_train_only=False,
