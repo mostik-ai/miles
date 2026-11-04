@@ -29,7 +29,7 @@ class TestLogTrainStep:
         calls = _capture(monkeypatch)
 
         log_dict = log_utils.log_train_step(
-            args=Namespace(trainer_model_id="alpha"),
+            args=Namespace(trainer_model_id="alpha", custom_train_step_log_function_path=None),
             loss_dict={"loss": 0.5},
             grad_norm=2.0,
             rollout_id=2,
@@ -48,7 +48,7 @@ class TestLogTrainStep:
         calls = _capture(monkeypatch)
 
         log_dict = log_utils.log_train_step(
-            args=Namespace(trainer_model_id=None),
+            args=Namespace(trainer_model_id=None, custom_train_step_log_function_path=None),
             loss_dict={"loss": 0.5},
             grad_norm=2.0,
             rollout_id=2,
@@ -60,6 +60,31 @@ class TestLogTrainStep:
         [(payload, step_key)] = calls
         assert step_key == "train/step"
         assert log_dict == payload == {"train/loss": 0.5, "train/grad_norm": 2.0, "train/step": 9}
+
+    def test_the_custom_train_step_log_function_sees_the_logged_step_and_can_stop_the_run(self, monkeypatch):
+        """A run that guards a train metric fails on the step that broke it, after the step reached the trackers."""
+        calls = _capture(monkeypatch)
+        seen = []
+
+        def stop_the_run(rollout_id, step_id, args, log_dict):
+            seen.append((rollout_id, step_id, log_dict))
+            raise RuntimeError("guard tripped")
+
+        monkeypatch.setattr(log_utils, "load_function", lambda path: {"pkg.guard": stop_the_run}[path])
+
+        with pytest.raises(RuntimeError, match="guard tripped"):
+            log_utils.log_train_step(
+                args=Namespace(trainer_model_id=None, custom_train_step_log_function_path="pkg.guard"),
+                loss_dict={"loss": 0.5},
+                grad_norm=2.0,
+                rollout_id=2,
+                step_id=1,
+                num_steps_per_rollout=4,
+                should_log=True,
+            )
+
+        [(payload, _step_key)] = calls
+        assert seen == [(2, 1, payload)]
 
 
 class TestGatherLogData:

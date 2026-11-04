@@ -363,6 +363,7 @@ contract, session behavior, and model-family selection.
 | `--log-interval` | int | `1` | Stdout log cadence (rollouts). |
 | `--custom-rollout-log-function-path` | str | – | Custom train logger. |
 | `--custom-eval-rollout-log-function-path` | str | – | Custom eval logger. |
+| `--custom-train-step-log-function-path` | str | – | Called after each train step is logged. |
 
 ### Profiling
 
