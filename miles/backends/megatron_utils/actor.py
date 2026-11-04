@@ -81,6 +81,7 @@ from ..training_utils.parallel import get_parallel_state
 from .checkpoint import load_checkpoint
 from .flash_attn_4_ulysses import patch_flash_attn_4_ulysses
 from .flash_attn_4_window import patch_flash_attn_4_window
+from .te_a2a_reorder import patch_te_a2a_reorder
 from .ft.checkpoint_transfer import recv_ckpt
 from .ft.checkpoint_transfer import send_ckpt as _send_ckpt
 from .ft.in_memory_checkpoint import InMemoryCheckpointManager
@@ -141,6 +142,7 @@ class MegatronTrainRayActor(TrainRayActor):
         monkey_patch_torch_dist()
         patch_flash_attn_4_window()
         patch_flash_attn_4_ulysses()
+        patch_te_a2a_reorder()
 
         self._last_rollout_id: int | None = None
         self._cell_index = indep_dp_info.cell_index
