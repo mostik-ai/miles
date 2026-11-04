@@ -2,12 +2,14 @@ import atexit
 import logging
 import os
 import shutil
+import time
 from contextlib import ExitStack, nullcontext
 from functools import partial
 
 import torch
 import torch.distributed as dist
 from megatron.training.async_utils import maybe_finalize_async_save
+from megatron.training.checkpointing import get_checkpoint_name
 from torch_memory_saver import torch_memory_saver
 
 from miles.backends.megatron_utils.hf_export import save_hf_model
@@ -29,7 +31,12 @@ from miles.backends.training_utils.loss.objective import (
     log_train_advantage_computation_event,
 )
 from miles.backends.training_utils.metrics import train_dump
-from miles.backends.training_utils.metrics.log_utils import log_cpu_memory, log_perf_data, log_rollout_data
+from miles.backends.training_utils.metrics.log_utils import (
+    log_checkpoint_save,
+    log_cpu_memory,
+    log_perf_data,
+    log_rollout_data,
+)
 from miles.backends.training_utils.model_companion import (
     ModelCompanionInstallationUtils,
     ModelCompanionWeightVersionUtils,
@@ -853,6 +860,7 @@ class MegatronTrainRayActor(TrainRayActor):
         if self.args.debug_rollout_only:
             return
 
+        save_started_at = time.time()
         self._finalize_pending_async_save()
 
         save(
@@ -870,10 +878,16 @@ class MegatronTrainRayActor(TrainRayActor):
         if force_sync:
             self._finalize_pending_async_save()
 
+        written = force_sync or not self.args.async_save
+        log_checkpoint_save(
+            rollout_id,
+            self.args,
+            save_seconds=time.time() - save_started_at,
+            checkpoint_dir=get_checkpoint_name(self.args.save, rollout_id, return_base_dir=True) if written else None,
+        )
+
         if self.args.custom_megatron_post_save_hook_path is not None and dist.get_rank() == 0:
             self._finalize_pending_async_save()
-
-            from megatron.training.checkpointing import get_checkpoint_name
 
             from miles.utils.function_registry import load_function
 

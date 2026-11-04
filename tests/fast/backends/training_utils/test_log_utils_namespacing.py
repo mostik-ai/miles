@@ -77,6 +77,39 @@ class TestGatherLogData:
         assert reduced == payload == {f"{namespace}rollout/log_probs": -1.0, f"{namespace}rollout/step": 3}
 
 
+class TestLogCheckpointSave:
+    @pytest.fixture()
+    def perf_rank(self, monkeypatch) -> None:
+        parallel_state = SimpleNamespace(
+            tp=SimpleNamespace(rank=0), is_pp_last_stage=True, effective_dp_cp=SimpleNamespace(rank=0)
+        )
+        monkeypatch.setattr(log_utils, "get_parallel_state", lambda: parallel_state)
+
+    def test_a_written_checkpoint_logs_its_save_time_and_size_at_its_rollout_step(
+        self, perf_rank, monkeypatch, tmp_path
+    ):
+        """Logged when the save ends rather than with the next step's perf metrics, so a run's last save shows too."""
+        calls = _capture(monkeypatch)
+        (tmp_path / "shard.distcp").write_bytes(b"x" * 1000)
+        args = Namespace(trainer_model_id=None, wandb_always_use_train_step=False)
+
+        log_utils.log_checkpoint_save(5, args, save_seconds=12.5, checkpoint_dir=str(tmp_path))
+
+        [(payload, step_key)] = calls
+        assert step_key == "rollout/step"
+        assert payload == {"perf/checkpoint/save_seconds": 12.5, "perf/checkpoint/size_gb": 1e-6, "rollout/step": 5}
+
+    def test_an_async_save_still_writing_logs_its_blocking_time_without_a_size(self, perf_rank, monkeypatch):
+        """Until the async writer finishes, the directory holds only part of the checkpoint."""
+        calls = _capture(monkeypatch)
+        args = Namespace(trainer_model_id=None, wandb_always_use_train_step=False)
+
+        log_utils.log_checkpoint_save(5, args, save_seconds=1.0, checkpoint_dir=None)
+
+        [(payload, _)] = calls
+        assert payload == {"perf/checkpoint/save_seconds": 1.0, "rollout/step": 5}
+
+
 class TestLogCpuMemory:
     def test_the_memory_series_of_a_policy_carries_its_own_step_axis(self, monkeypatch):
         """The memory point is logged per rollout, so it needs the same policy step axis as the other perf points."""

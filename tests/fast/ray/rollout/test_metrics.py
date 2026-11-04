@@ -6,6 +6,7 @@ from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples
 
 from miles.ray.rollout.metrics import (
     _compute_episode_response_length_metrics,
+    _compute_generation_time_metrics,
     _compute_metrics_from_samples,
     _compute_passrate_from_samples,
     _compute_spec_metrics,
@@ -444,6 +445,50 @@ class TestTitoMismatchMetrics:
         assert logged["rollout/episode_total_response_length/mean"] == pytest.approx(4.0)
         assert logged["rollout/tito_session_mismatch_rate/v2/assistant_text"] == 0.25
         assert "rollout/tito_session_mismatch_rate/assistant_text" not in logged
+
+
+class TestComputeGenerationTimeMetrics:
+    def test_times_the_rollout_its_samples_and_its_groups(self):
+        """Under --fully-async rollout_time only times taking the batch from the buffer, so generation is timed here."""
+        samples = [
+            make_sample(group_index=0, index=0, response_length=100),
+            make_sample(group_index=0, index=1, response_length=300),
+            make_sample(group_index=1, index=2, response_length=200),
+            make_sample(group_index=1, index=3, response_length=400),
+        ]
+        for sample, (started_at, finished_at) in zip(samples, [(0, 10), (0, 30), (5, 25), (5, 45)], strict=True):
+            sample.record_generation_call(started_at=float(started_at), finished_at=float(finished_at))
+
+        out = _compute_generation_time_metrics(samples, logged_at=100.0)
+
+        assert out == {
+            "batch_seconds": 45.0,
+            "sample_seconds_mean": 25.0,
+            "sample_seconds_max": 40.0,
+            "group_seconds_mean": 35.0,
+            "group_seconds_max": 40.0,
+            "tokens_per_second": 10.0,
+            "wait_before_training_seconds_mean": 72.5,
+        }
+
+    def test_samples_without_generate_calls_give_no_generation_metrics(self):
+        """Rollout data loaded for debugging was never generated in this run."""
+        assert _compute_generation_time_metrics(make_samples_grouped(1, 2), logged_at=1.0) == {}
+
+    def test_rollout_log_reports_the_generation_times(self, monkeypatch):
+        args = make_args(advantage_estimator="ppo", ci_test=False, log_passrate=False)
+        samples = make_samples_grouped(1, 2)
+        for sample in samples:
+            sample.record_generation_call(started_at=0.0, finished_at=2.0)
+        logged = {}
+        monkeypatch.setattr(
+            "miles.ray.rollout.metrics.tracking.log",
+            lambda _args, metrics, **_kwargs: logged.update(metrics),
+        )
+
+        log_rollout_data(0, args, samples, None, 1.0)
+
+        assert logged["rollout/generation/batch_seconds"] == 2.0
 
 
 class TestComputePassrateFromSamples:

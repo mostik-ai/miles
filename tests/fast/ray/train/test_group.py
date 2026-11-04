@@ -275,6 +275,18 @@ class TestInit:
         assert _cell(group, 2).indep_dp_info.alive_rank == 2
 
 
+class TestDispose:
+    async def test_dispose_finishes_the_trackers_of_every_alive_cell(self):
+        """Ray kills the actors once the job ends, so metrics their trackers still buffer must be sent first."""
+        group = await _make_alive_controller(num_cells=2)
+
+        await group.dispose()
+
+        for cell_index in range(2):
+            for handle in get_raw_actor_handles(_cell(group, cell_index)):
+                assert "finish_tracking" in [call[0] for call in ray.get(handle.get_calls.remote())]
+
+
 class TestInitRunsExactlyOnce:
     async def test_a_controller_that_never_ran_init_reports_itself_uninitialized(self):
         """A restarted script asks the controller it found running whether to initialize it or to resume it."""
