@@ -48,12 +48,14 @@ def test_mixed_dataset_uses_processor_only_for_structured_prompts(tmp_path) -> N
             ],
         }
     ]
+    token_prompt = [151644, 872, 198]
     prompt_path = tmp_path / "prompts.jsonl"
     prompt_path.write_text(
         "\n".join(
             [
                 json.dumps({"prompt": text_prompt}),
                 json.dumps({"prompt": multimodal_prompt}),
+                json.dumps({"prompt": token_prompt}),
             ]
         )
         + "\n"
@@ -76,6 +78,8 @@ def test_mixed_dataset_uses_processor_only_for_structured_prompts(tmp_path) -> N
         "images": ["image"],
         "videos": [],
     }
+    assert dataset.samples[2].prompt == token_prompt
+    assert dataset.samples[2].multimodal_inputs is None
     assert processor.prompts == [multimodal_prompt]
 
 
