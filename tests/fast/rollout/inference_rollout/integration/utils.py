@@ -1,3 +1,5 @@
+from dataclasses import replace
+
 from tests.fast.fixtures.generation_fixtures import extra_argv_for_variant
 from tests.fast.fixtures.rollout_fixtures import RolloutEnvConfig
 
@@ -44,6 +46,10 @@ def expected_sample(*, group_index: int | None) -> Sample:
         ),
         prefix_cache_info=Sample.PrefixCacheInfo(cached_tokens=0, total_prompt_tokens=7),
     )
+
+
+def without_generation_times(sample: Sample) -> Sample:
+    return replace(sample, generation_started_at=None, generation_finished_at=None, generation_seconds=0.0)
 
 
 MODULAR_ROLLOUT_BASE_ARGV = [

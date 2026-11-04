@@ -285,6 +285,7 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
         async_save=False,
         custom_megatron_post_save_hook_path=None,
         debug_rollout_only=False,
+        save="/checkpoints",
         save_hf=None,
     )
     worker.role = "actor"
@@ -302,6 +303,7 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
     monkeypatch.setattr(actor_module, "save", save)
     monkeypatch.setattr(actor_module, "reload_process_groups", reload_groups)
     monkeypatch.setattr(actor_module, "destroy_process_groups", destroy_groups)
+    monkeypatch.setattr(actor_module, "log_checkpoint_save", Mock())
 
     worker.save_model(6)
 
@@ -327,6 +329,7 @@ def test_force_sync_save_overlaps_hf_export_with_async_checkpoint(actor_module, 
         async_save=True,
         custom_megatron_post_save_hook_path=None,
         debug_rollout_only=False,
+        save="/checkpoints",
         save_hf="/checkpoints/hf/{rollout_id}",
     )
     worker.role = "actor"
@@ -347,6 +350,7 @@ def test_force_sync_save_overlaps_hf_export_with_async_checkpoint(actor_module, 
         lambda **_kwargs: events.append("finalize"),
     )
     monkeypatch.setattr(actor_module, "save_hf_model", lambda *_args, **_kwargs: events.append("save_hf"))
+    monkeypatch.setattr(actor_module, "log_checkpoint_save", Mock())
 
     worker.save_model(6, force_sync=True)
 
