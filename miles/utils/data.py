@@ -241,11 +241,13 @@ class Dataset:
             else:
                 output_prompt = prompt
 
-            if token_space_processing and isinstance(prompt, list):
+            # A prompt of token ids, as coral's SFT runs write them, holds no media.
+            is_chat_messages = isinstance(prompt, list) and all(isinstance(message, dict) for message in prompt)
+            if token_space_processing and is_chat_messages:
                 # Collected before the chat template turns the messages into text. SGLang expands the media
                 # placeholders and the trainer rebuilds the processor tensors from these references.
                 multimodal_inputs = collect_media_refs(prompt, media_dir)
-            elif processor and isinstance(prompt, list):
+            elif processor and is_chat_messages:
                 from miles.utils.processing_utils import process_vision_info
 
                 multimodal_inputs = process_vision_info(prompt, processor)
