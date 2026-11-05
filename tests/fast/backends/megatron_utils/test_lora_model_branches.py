@@ -7,6 +7,8 @@ route to LoRA-specific code paths depending on configuration — without GPU.
 from argparse import Namespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
 # _ensure_model_list
@@ -179,22 +181,35 @@ class TestSetupModelAndOptimizerLoraBranch:
 
 
 class TestSaveLoRaBranch:
+    @pytest.mark.parametrize(("checkpoint_format", "saved_as_adapter"), [("adapter", True), ("torch_dist", False)])
     @patch(f"{_MODEL_MODULE}.save_model_hashes")
     @patch(f"{_MODEL_MODULE}.enable_forward_pre_hook")
     @patch(f"{_MODEL_MODULE}.disable_forward_pre_hook")
     @patch(f"{_MODEL_MODULE}.should_disable_forward_pre_hook", return_value=False)
     @patch(f"{_MODEL_MODULE}.get_args")
+    @patch(f"{_MODEL_MODULE}.save_checkpoint")
     @patch(f"{_MODEL_MODULE}.save_checkpoint_with_lora")
     @patch(f"{_MODEL_MODULE}.is_lora_model", return_value=True)
-    def test_lora_model_calls_lora_save(
-        self, mock_is_lora, mock_save_lora, mock_get_args, mock_should, mock_disable, mock_enable, mock_save_hashes
+    def test_lora_model_saves_in_its_checkpoint_format(
+        self,
+        mock_is_lora,
+        mock_save_lora,
+        mock_save_ckpt,
+        mock_get_args,
+        mock_should,
+        mock_disable,
+        mock_enable,
+        mock_save_hashes,
+        checkpoint_format,
+        saved_as_adapter,
     ):
         from miles.backends.megatron_utils.model import save
 
-        model = [MagicMock()]
-        save(42, model, MagicMock(), MagicMock())
+        mock_get_args.return_value = Namespace(ci_test=False, lora_checkpoint_format=checkpoint_format)
+        save(42, [MagicMock()], MagicMock(), MagicMock())
 
-        mock_save_lora.assert_called_once()
+        assert mock_save_lora.called is saved_as_adapter
+        assert mock_save_ckpt.called is not saved_as_adapter
 
     @patch(f"{_MODEL_MODULE}.save_model_hashes")
     @patch(f"{_MODEL_MODULE}.enable_forward_pre_hook")
