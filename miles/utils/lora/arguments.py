@@ -110,6 +110,16 @@ def add_lora_arguments(parser):
         ),
     )
     parser.add_argument(
+        "--lora-merged-rollout",
+        action="store_true",
+        default=False,
+        help=(
+            "Serve rollouts from the base weights with the trained adapter merged in: each weight update sends "
+            "the merged weights in full, as a full fine-tune does, so SGLang decodes without LoRA kernels and "
+            "can run a speculative drafter. Bridge LoRA only, and not with --colocate."
+        ),
+    )
+    parser.add_argument(
         "--experts-shared-outer-loras",
         action="store_true",
         default=False,
@@ -161,6 +171,15 @@ def validate_lora_args(args):
             "Megatron's sharded state, so its checkpoint would hold the frozen model without them"
         )
         assert not is_multi_lora_enabled(args), "--lora-checkpoint-format torch_dist saves one adapter, not slots"
+    if getattr(args, "lora_merged_rollout", False):
+        assert args.megatron_to_hf_mode == "bridge", "--lora-merged-rollout merges through Bridge's export"
+        assert not args.lora_train_only, "--lora-train-only serves the frozen base, not the merged adapter"
+        assert not is_multi_lora_enabled(args), "--lora-merged-rollout merges one adapter, not slots"
+        assert not args.colocate, "--lora-merged-rollout merges weights that a colocated trainer offloads"
+        # The session server attaches lora_path from its own copy of the LoRA flags, which has no merged mode.
+        assert not getattr(
+            args, "use_session_server", False
+        ), "--lora-merged-rollout does not support the session server"
     hf_config = load_hf_config(args.hf_checkpoint)
     args.hf_lora_targets, args.lora_adapter_targets = _resolve_lora_targets(args, hf_config)
 
