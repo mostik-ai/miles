@@ -688,7 +688,9 @@ def train_one_step(
             witness_dump_and_clear_stale(model=model, witness_info=witness_info, optimizer=optimizer)
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            metric_num_rollouts = None if args.calculate_per_token_loss else num_rollouts
+            # with samples skipped, metrics average over those computed, not the batch the loss divides by
+            per_computed_sample = args.calculate_per_token_loss or args.skip_zero_advantage_samples
+            metric_num_rollouts = None if per_computed_sample else num_rollouts
             loss_reduced = (
                 indep_dp_loss_reduced
                 if parallel_state.indep_dp.size > 1
