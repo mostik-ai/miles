@@ -935,6 +935,16 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--group-first-stage-samples",
+                type=int,
+                default=None,
+                help=(
+                    "In fully async training, generate only this many samples of a group first, abandon the group "
+                    "when none of them earned a reward, and generate the rest otherwise. None generates the whole "
+                    "group at once."
+                ),
+            )
+            parser.add_argument(
                 "--async-max-concurrent-samples",
                 type=int,
                 default=None,

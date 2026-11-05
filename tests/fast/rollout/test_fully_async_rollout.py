@@ -119,6 +119,9 @@ def make_args(**overrides) -> Namespace:
         sglang_router_request_timeout_secs=14400,
         eval_num_gpus=0,
         namespaced_radix_cache=True,
+        group_first_stage_samples=None,
+        group_rm=False,
+        sglang_enable_deterministic_inference=False,
     )
     defaults.update(overrides)
     return Namespace(**defaults)
@@ -684,6 +687,154 @@ async def test_sample_filter_marks_samples_without_shrinking_the_batch(monkeypat
 
 
 # ── DataBuffer: staleness-bounded buffering ─────────────────────────
+
+
+class TestFirstStage:
+    """Each group has one first-stage sample (index ending in 0) and one later sample (index ending in 1)."""
+
+    @staticmethod
+    def _generate(right: set[int], generated: list[int], gate: asyncio.Event | None = None):
+        async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+            for sample in group:
+                generated.append(sample.index)
+            await (gate.wait() if gate is not None else asyncio.sleep(0))
+            for sample in group:
+                sample.status = Sample.Status.COMPLETED
+                sample.response_length = 100
+                sample.reward = {"reward": 1.0 if sample.index in right else 0.0}
+                sample_done_callback()
+            return group
+
+        return generate
+
+    @staticmethod
+    def _prompt_group(group_index: int) -> list[Sample]:
+        return [
+            Sample(group_index=group_index, index=group_index * 10 + i, prompt=f"prompt {group_index}")
+            for i in range(N_SAMPLES_PER_PROMPT)
+        ]
+
+    @staticmethod
+    def _args(**overrides) -> Namespace:
+        return make_args(
+            **{"group_first_stage_samples": 1, "reward_key": "reward", "rollout_batch_size": 1, **overrides}
+        )
+
+    async def test_a_group_with_no_reward_is_abandoned_and_its_tokens_are_counted(self, monkeypatch):
+        generated: list[int] = []
+        # the later sample of group 1 would have been right, and it must never run
+        generate = self._generate(right={11, 20}, generated=generated)
+        source = FakeDataSource(scripted=[self._prompt_group(1), self._prompt_group(2)])
+        fn = make_fn(monkeypatch, self._args(), source, generate=generate)
+
+        output = await asyncio.wait_for(fn(train_input(rollout_id=0)), timeout=5)
+        await fn.dispose()
+
+        assert 11 not in generated
+        assert [[sample.index for sample in group] for group in output.samples] == [[20, 21]]
+        assert output.metrics["rollout/fully_async/aborted_groups_filtered"] == 1
+        assert output.metrics["rollout/fully_async/aborted_group_tokens"] == 100
+
+    async def test_a_reward_in_the_first_stage_trains_the_whole_group_with_every_verdict(self, monkeypatch):
+        generate = self._generate(right={10}, generated=[])
+        fn = make_fn(monkeypatch, self._args(), FakeDataSource(scripted=[self._prompt_group(1)]), generate=generate)
+
+        output = await asyncio.wait_for(fn(train_input(rollout_id=0)), timeout=5)
+        await fn.dispose()
+
+        [group] = output.samples
+        assert [(sample.index, sample.reward["reward"]) for sample in group] == [(10, 1.0), (11, 0.0)]
+        assert {sample.status for sample in group} == {Sample.Status.COMPLETED}
+        assert output.metrics["rollout/fully_async/aborted_group_tokens"] == 0
+
+    async def test_the_budget_counts_only_samples_generating(self, monkeypatch):
+        gate = asyncio.Event()
+        generate = self._generate(right=set(), generated=[], gate=gate)
+        source = FakeDataSource()
+        fn = make_fn(monkeypatch, self._args(rollout_batch_size=2), source, generate=generate)
+
+        fn._worker = asyncio.create_task(fn._worker_loop())
+        await asyncio.sleep(0.01)
+
+        # 4 slots hold 3 groups of one running sample each, because the next group must fit whole
+        assert source.num_get_calls == 3
+        assert fn._scheduler.samples_in_flight == 3
+        await fn.dispose()
+
+    async def test_a_later_sample_is_charged_a_slot_while_it_generates(self, monkeypatch):
+        in_flight: list[int] = []
+        fn = None
+
+        async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+            in_flight.append(fn._scheduler.samples_in_flight)
+            return await self._generate(right={10}, generated=[])(
+                state, group, sampling_params, evaluation, sample_done_callback
+            )
+
+        fn = make_fn(monkeypatch, self._args(), FakeDataSource(scripted=[self._prompt_group(1)]), generate=generate)
+
+        await asyncio.wait_for(fn(train_input(rollout_id=0)), timeout=5)
+        await fn.dispose()
+
+        assert min(in_flight) >= 1
+
+    async def test_a_later_sample_takes_the_namespace_of_the_call_it_starts_under(self, monkeypatch):
+        gate = asyncio.Event()
+        generate = self._generate(right={10}, generated=[], gate=gate)
+        fn = make_fn(monkeypatch, self._args(), FakeDataSource(scripted=[self._prompt_group(1)]), generate=generate)
+
+        fn._curr_kv_cache_namespace = "train:-:5"
+        task = fn._submit_one_group()
+        await asyncio.sleep(0)
+        fn._curr_kv_cache_namespace = "train:-:6"
+        gate.set()
+        result = await task
+
+        assert [sample.kv_cache_namespace for sample in result.group] == ["train:-:5", "train:-:6"]
+
+    async def test_a_relaunch_restarts_a_group_caught_in_its_later_stage(self, monkeypatch, tmp_path):
+        generated: list[int] = []
+        gate = asyncio.Event()
+
+        async def generate(state, group, sampling_params, evaluation=False, sample_done_callback=None):
+            if group[0].index % 10 == 1:
+                generated.append(group[0].index)
+                await gate.wait()
+            for sample in group:
+                sample.status = Sample.Status.COMPLETED
+                sample.response_length = 100
+                sample.reward = {"reward": 1.0}
+                sample_done_callback()
+            return group
+
+        source = FakeDataSource(scripted=[self._prompt_group(1)])
+        first = make_fn(monkeypatch, self._args(), source, generate=generate)
+        first._submit_one_group()
+        await asyncio.sleep(0.01)
+        assert generated == [11]
+        first.save(tmp_path)
+
+        relaunched = make_fn(monkeypatch, self._args(), FakeDataSource(), generate=generate)
+        relaunched.load(tmp_path)
+        [restored] = relaunched._retry_buffer
+
+        assert [sample.index for sample in restored] == [10, 11]
+        assert all(sample.response_length == 0 and sample.reward is None for sample in restored)
+        first._running_tasks[0].task.cancel()
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"group_first_stage_samples": N_SAMPLES_PER_PROMPT},
+            {"group_first_stage_samples": 0},
+            {"group_rm": True},
+            {"async_unused_samples_handler": "retry"},
+            {"sglang_enable_deterministic_inference": True},
+        ],
+    )
+    def test_refuses_arguments_that_break_the_stages(self, monkeypatch, overrides):
+        with pytest.raises(AssertionError):
+            make_fn(monkeypatch, self._args(**overrides), FakeDataSource())
 
 
 def make_buffer(max_groups=None, max_staleness=None):
