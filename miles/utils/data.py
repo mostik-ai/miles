@@ -237,7 +237,7 @@ class Dataset:
             else:
                 output_prompt = prompt
 
-            if processor and isinstance(prompt, list):
+            if processor and isinstance(prompt, list) and all(isinstance(message, dict) for message in prompt):
                 from miles.utils.processing_utils import process_vision_info
 
                 multimodal_inputs = process_vision_info(prompt, processor)

@@ -102,6 +102,7 @@ def trainer_args(*, num_cells: int) -> SimpleNamespace:
         expert_model_parallel_size=1,
         expert_tensor_parallel_size=None,
         train_backend="megatron",
+        custom_trainer_actor_path=None,
         train_env_vars={},
         dumper_source_patcher_config_train=None,
         offload_train=False,
