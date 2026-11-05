@@ -76,7 +76,9 @@ def actor_module():
 
 def _worker(actor_module, role, *, asleep=True):
     worker = object.__new__(actor_module.MegatronTrainRayActor)
-    worker.args = Namespace(offload_train=True, debug_rollout_only=False, enable_sample_ownership_checker=False)
+    worker.args = Namespace(
+        offload_train=True, debug_rollout_only=False, async_save=False, enable_sample_ownership_checker=False
+    )
     worker.role = role
     worker._asleep = asleep
     worker._heartbeat = Mock()
@@ -262,6 +264,28 @@ def test_compute_log_prob_replays_sampling_support_only_for_actor_scores(
     assert forward_only.call_args.kwargs["use_rollout_sampling_mask"] is expected
 
 
+def test_every_save_hands_megatron_the_same_context_for_its_save_plan(actor_module, monkeypatch):
+    worker = object.__new__(actor_module.MegatronTrainRayActor)
+    worker.args = Namespace(
+        async_save=True,
+        custom_megatron_post_save_hook_path=None,
+        debug_rollout_only=False,
+        save_hf=None,
+    )
+    worker.role = "actor"
+    worker._heartbeat = Mock()
+    worker.model = worker.optimizer = worker.opt_param_scheduler = worker.snapshot_publisher = object()
+    worker._save_context = {}
+    save = Mock()
+    monkeypatch.setattr(actor_module, "save", save)
+
+    worker.save_model(6)
+    worker.save_model(16)
+
+    first, second = (call.kwargs["checkpointing_context"] for call in save.call_args_list)
+    assert first is second is worker._save_context
+
+
 def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
     worker = object.__new__(actor_module.MegatronTrainRayActor)
     worker.args = Namespace(
@@ -277,6 +301,7 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
     worker.optimizer = object()
     worker.opt_param_scheduler = object()
     worker.snapshot_publisher = object()
+    worker._save_context = {}
     worker.wake_up = Mock()
     worker.sleep = Mock()
     save = Mock()
@@ -290,7 +315,12 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
     worker.save_model(6)
 
     save.assert_called_once_with(
-        6, worker.model, worker.optimizer, worker.opt_param_scheduler, snapshot_publisher=worker.snapshot_publisher
+        6,
+        worker.model,
+        worker.optimizer,
+        worker.opt_param_scheduler,
+        checkpointing_context=worker._save_context,
+        snapshot_publisher=worker.snapshot_publisher,
     )
     worker.wake_up.assert_not_called()
     worker.sleep.assert_not_called()
@@ -313,6 +343,7 @@ def test_force_sync_save_overlaps_hf_export_with_async_checkpoint(actor_module, 
     worker.optimizer = object()
     worker.opt_param_scheduler = object()
     worker.snapshot_publisher = object()
+    worker._save_context = {}
     events = []
 
     monkeypatch.setattr(actor_module, "save", lambda *_args, **_kwargs: events.append("save"))
@@ -337,6 +368,7 @@ def test_update_weights_only_uses_temporary_process_groups_when_asleep(actor_mod
 
     worker = object.__new__(actor_module.MegatronTrainRayActor)
     worker.args = Namespace(
+        async_save=False,
         debug_rollout_only=False,
         debug_skip_weight_update=True,
         debug_train_only=False,
