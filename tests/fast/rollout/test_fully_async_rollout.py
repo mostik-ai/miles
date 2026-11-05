@@ -735,6 +735,21 @@ class TestFirstStage:
         assert output.metrics["rollout/fully_async/aborted_groups_filtered"] == 1
         assert output.metrics["rollout/fully_async/aborted_group_tokens"] == 100
 
+    async def test_a_data_source_that_asks_hears_of_each_abandoned_group_and_only_those(self, monkeypatch):
+        abandoned: list[list[Sample]] = []
+        source = FakeDataSource(scripted=[self._prompt_group(1), self._prompt_group(2)])
+        source.observe_abandoned = abandoned.append
+        generate = self._generate(right={20}, generated=[])
+        fn = make_fn(monkeypatch, self._args(), source, generate=generate)
+
+        await asyncio.wait_for(fn(train_input(rollout_id=0)), timeout=5)
+        await fn.dispose()
+
+        # the worker goes on past the drain, so groups the data source manufactures after these may follow
+        indices = [group[0].group_index for group in abandoned]
+        assert indices[0] == 1
+        assert 2 not in indices
+
     async def test_a_reward_in_the_first_stage_trains_the_whole_group_with_every_verdict(self, monkeypatch):
         generate = self._generate(right={10}, generated=[])
         fn = make_fn(monkeypatch, self._args(), FakeDataSource(scripted=[self._prompt_group(1)]), generate=generate)

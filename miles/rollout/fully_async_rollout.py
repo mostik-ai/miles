@@ -188,6 +188,8 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         if later_stage and not _first_stage_earned_reward(self.args, group):
             # The aborted status sends the group to the buffer's unused path; the later samples never ran.
             group = [replace(sample, status=Sample.Status.ABORTED) for sample in [*group, *later_stage]]
+            if (observe_abandoned := getattr(self.data_source, "observe_abandoned", None)) is not None:
+                observe_abandoned(prompt_group)
         elif later_stage:
             self._start_samples(later_stage)
             group = [*group, *await self._generate_samples(later_stage)]
