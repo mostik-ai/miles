@@ -21,7 +21,9 @@ async def remote_rm(args, sample: Sample):
         "response": sample.response,
         "label": sample.label,
     }
-    session_kwargs = {}
+    # experiment: a call may take 1,800 s in all, as the stack's --rm-timeout 1800 sets, with no separate connect limit;
+    # aiohttp's default gives a connect 30 s, and the rollout checkpoint blocks this event loop for 20-40 s
+    session_kwargs = {"timeout": aiohttp.ClientTimeout(total=1800)}
     async with aiohttp.ClientSession(**session_kwargs) as session:
         async with session.post(args.rm_url, json=payload) as resp:
             resp.raise_for_status()
