@@ -80,18 +80,16 @@ def get_rollout_data(
         ]
 
     if args.qkv_format == "bshd":
-        # TODO: micro-batch wise dynamic, possibly move to @data.py:get_data_iterator
-        max_seq_len = max(rollout_data["total_lengths"])
-
         # pad to reduce memory fragmentation and maybe make the computation faster
         pad_size = parallel_state.tp.size * args.data_pad_size_multiplier
         max_compress_ratio = max(args.backend.compress_ratios) if args.backend.compress_ratios else 0
         if max_compress_ratio:
             local_seqlen_multiple = max_compress_ratio * (2 if parallel_state.cp.size > 1 else 1)
             pad_size = max(pad_size, local_seqlen_multiple * parallel_state.cp.size)
-        max_seq_len = (max_seq_len + pad_size - 1) // pad_size * pad_size
 
-        rollout_data["max_seq_lens"] = [max_seq_len] * len(rollout_data["tokens"])
+        rollout_data["max_seq_lens"] = _bshd_padded_lengths(
+            rollout_data["total_lengths"], _bshd_micro_batches(args, rollout_data), pad_size=pad_size
+        )
 
     # Full-response SGLang OPD fields share rollout CP slicing but retain float32 precision.
     for key in ("rollout_log_probs", "teacher_log_probs", "opd_reverse_kl"):
@@ -123,6 +121,39 @@ def get_rollout_data(
     if "rollout_indexer_topk" in rollout_data:
         rollout_data["rollout_indexer_topk"] = [torch.from_numpy(r) for r in rollout_data["rollout_indexer_topk"]]
     return rollout_data, store_get_result
+
+
+def _bshd_micro_batches(args: Namespace, rollout_data: RolloutBatch) -> list[list[int]]:
+    """Local row indices of each micro-batch that ``get_data_iterator`` will build.
+
+    A training-side dynamic schedule is balanced after padding, so its rows form one group.
+    TODO: pad those micro-batches separately too, once ``get_data_iterator`` owns the padding.
+    """
+    num_rows = len(rollout_data["total_lengths"])
+    if "micro_batch_indices" in rollout_data:
+        return [list(rows) for rows in rollout_data["micro_batch_indices"]]
+    if args.use_dynamic_batch_size:
+        return [list(range(num_rows))]
+    size = args.backend.micro_batch_size
+    return [list(range(start, min(start + size, num_rows))) for start in range(0, num_rows, size)]
+
+
+def _bshd_padded_lengths(
+    total_lengths: Sequence[int], micro_batches: Sequence[Sequence[int]], *, pad_size: int
+) -> list[int]:
+    """Pad each micro-batch to its own longest row, rounded up to ``pad_size``.
+
+    Padding every row to the rollout's longest wastes compute, and routing replay sends padded rows to
+    experts ``0..topk-1``, so a single expert-parallel rank receives every padded token.
+    """
+    padded_lengths: list[int | None] = [None] * len(total_lengths)
+    for rows in micro_batches:
+        longest = max(total_lengths[row] for row in rows)
+        for row in rows:
+            padded_lengths[row] = (longest + pad_size - 1) // pad_size * pad_size
+    unscheduled = [row for row, length in enumerate(padded_lengths) if length is None]
+    assert not unscheduled, f"rows {unscheduled} belong to no micro-batch"
+    return padded_lengths
 
 
 def _prepare_loss_masks(
