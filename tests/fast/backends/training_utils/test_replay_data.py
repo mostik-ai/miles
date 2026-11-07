@@ -9,6 +9,8 @@ import torch
 
 from miles.backends.training_utils import parallel
 from miles.backends.training_utils.replay.data import fill_replay_data, register_replay_list_sequential
+from miles.utils import replay_base
+from miles.utils.replay_base import RoutingReplayManager
 
 
 class _Replay:
@@ -16,8 +18,27 @@ class _Replay:
         self.stream_idx = stream_idx
         self.recorded = []
 
-    def record(self, value):
+    def record_without_copy(self, value):
         self.recorded.append(value)
+
+
+@pytest.fixture(autouse=True)
+def _unpinned_host_buffers(monkeypatch):
+    monkeypatch.setattr(replay_base.current_platform, "dynamic_shapes", False)
+
+
+def test_register_replay_list_sequential_records_every_stream_in_one_host_buffer():
+    replay_data = torch.arange(5 * 4 * 2, dtype=torch.int32).reshape(5, 4, 2)
+    expected = replay_data.clone()
+    manager = RoutingReplayManager()
+    replays = [manager.create_replay(stream_idx=3), manager.create_replay(stream_idx=1)]
+
+    register_replay_list_sequential(replays, replay_data)
+    replay_data.fill_(-7)
+
+    torch.testing.assert_close(replays[0].top_indices_list[0], expected[:, 3])
+    torch.testing.assert_close(replays[1].top_indices_list[0], expected[:, 1])
+    assert len({replay.top_indices_list[0].untyped_storage().data_ptr() for replay in replays}) == 1
 
 
 def test_register_replay_list_sequential_falls_back_to_enum_when_no_stream_idx():
