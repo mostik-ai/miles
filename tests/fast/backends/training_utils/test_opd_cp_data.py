@@ -32,6 +32,8 @@ def _args(qkv_format: str) -> Namespace:
         qkv_format=qkv_format,
         data_pad_size_multiplier=16,
         compress_ratios=[],
+        micro_batch_size=1,
+        use_dynamic_batch_size=False,
         true_on_policy_mode=False,
         bf16=False,
         fp16=False,
