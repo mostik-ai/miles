@@ -3,7 +3,8 @@ from typing import Protocol
 import torch
 
 from miles.backends.training_utils.data.context_parallel import slice_with_cp
-from miles.backends.training_utils.parallel import get_parallel_state
+from miles.backends.training_utils.parallel import GroupInfo, ParallelState, get_parallel_state
+from miles.utils.replay_base import record_streams
 
 
 class RegisterReplayListFunc(Protocol):
@@ -18,13 +19,15 @@ def register_replay_list_sequential(replay_list, replay_data, **_kwargs):
     tensor contains more streams than this rank registered). Otherwise falls
     back to 1:1 enumeration order.
     """
+    stream_indices = []
     for replay_idx, replay in enumerate(replay_list):
         stream_idx = replay.stream_idx if replay.stream_idx is not None else replay_idx
         if not 0 <= stream_idx < replay_data.shape[1]:
             raise AssertionError(
                 f"replay stream_idx {stream_idx} out of range " f"(replay_data has {replay_data.shape[1]} streams)"
             )
-        replay.record(replay_data[:, stream_idx])
+        stream_indices.append(stream_idx)
+    record_streams(replay_list, replay_data, stream_indices)
 
 
 def fill_replay_data(
@@ -61,9 +64,9 @@ def fill_replay_data(
         iterator.reset()
 
     parallel_state = get_parallel_state()
-    tp_rank = parallel_state.tp.rank
-    tp_size = parallel_state.tp.size
     qkv_format = args.qkv_format
+    # sequence_parallel is Megatron-only; FSDP has tp_size == 1 so the slice is a no-op there.
+    sequence_parallel = args.train_backend == "megatron" and args.backend.sequence_parallel and if_sp_region
 
     def pad_func(data, pad):
         _, num_layers, topk = data.shape
@@ -83,28 +86,23 @@ def fill_replay_data(
         for a, b in zip(replay_data, tokens, strict=False):
             assert a.shape[0] == b.shape[0] - 1, f"{a.shape}, {b.shape}"
 
-        # Pad replay data to align with the token batch's final token. The padded token is masked from loss.
-        # TODO: fuse this padding with the following slice_with_cp to reduce memory copy.
-        replay_data = [pad_func(r, 1) for r in replay_data]
-        # TODO: maybe extract a common process function for here and get_batch?
-
-        cp_size = parallel_state.cp.size
-        cp_rank = parallel_state.cp.rank
         if qkv_format == "bshd":
-            max_seqlen = batch["max_seq_lens"][0]
-            if args.allgather_cp and cp_size > 1:
-                assert max_seqlen % cp_size == 0, f"max_seqlen {max_seqlen} must be divisible by cp_size {cp_size}"
-                local_len = max_seqlen // cp_size
-                start = cp_rank * local_len
-                replay_data = [pad_func(r, max_seqlen - r.size(0))[start : start + local_len] for r in replay_data]
-            else:
-                replay_data = [slice_with_cp(r, pad_func, qkv_format, max_seqlen) for r in replay_data]
-            replay_data = torch.stack(replay_data, dim=0)
-            batch_size, seqlen, num_layers, topk = replay_data.shape
-            if sequence_first:
-                replay_data = replay_data.transpose(0, 1)
-            replay_data = replay_data.reshape(batch_size * seqlen, num_layers, topk)
+            replay_data = _local_bshd_rows(
+                replay_data,
+                parallel_state=parallel_state,
+                max_seqlen=batch["max_seq_lens"][0],
+                allgather_cp=args.allgather_cp,
+                sequence_first=sequence_first,
+                sequence_parallel=sequence_parallel,
+            )
         else:
+            # Pad replay data to align with the token batch's final token. The padded token is masked from loss.
+            # TODO: fuse this padding with the following slice_with_cp to reduce memory copy.
+            replay_data = [pad_func(r, 1) for r in replay_data]
+            # TODO: maybe extract a common process function for here and get_batch?
+
+            cp_size = parallel_state.cp.size
+            cp_rank = parallel_state.cp.rank
             pad_size = parallel_state.tp.size * args.data_pad_size_multiplier
             if args.allgather_cp and cp_size > 1:
                 replay_data = torch.cat(replay_data, dim=0)
@@ -125,13 +123,8 @@ def fill_replay_data(
                 pad = (pad_size - replay_data.size(0) % pad_size) % pad_size
                 if pad != 0:
                     replay_data = pad_func(replay_data, pad)
-
-        # sequence_parallel is Megatron-only; FSDP has tp_size == 1 so the slice is a no-op there.
-        if args.train_backend == "megatron" and args.backend.sequence_parallel and if_sp_region:
-            seqlen = replay_data.size(0)
-            assert seqlen % tp_size == 0
-            start, end = seqlen // tp_size * tp_rank, seqlen // tp_size * (tp_rank + 1)
-            replay_data = replay_data[start:end]
+            if sequence_parallel:
+                replay_data = _sequence_parallel_rows(replay_data, parallel_state.tp)
 
         register_replay_list_func(replay_list, replay_data, models=models)
 
@@ -141,3 +134,62 @@ def fill_replay_data(
 
     for iterator in data_iterator:
         iterator.reset()
+
+
+def _local_bshd_rows(
+    replay_data: list[torch.Tensor],
+    *,
+    parallel_state: ParallelState,
+    max_seqlen: int,
+    allgather_cp: bool,
+    sequence_first: bool,
+    sequence_parallel: bool,
+) -> torch.Tensor:
+    """Copy only the rows of a bshd micro-batch that this rank's token layout holds.
+
+    Each sample is padded with -1 rows to `max_seqlen`, the row of its final token included. The samples are laid out
+    `[S, B]` when `sequence_first` and `[B, S]` otherwise, then sliced for context and sequence parallelism like the
+    tokens. The layout is worked out on positions, so no rank copies whole padded samples.
+    """
+    longest = max(len(sample) for sample in replay_data)
+    assert longest < max_seqlen, f"a sample has {longest + 1} tokens, more than max_seqlen {max_seqlen}"
+    positions = _local_bshd_positions(max_seqlen, parallel_state=parallel_state, allgather_cp=allgather_cp)
+    sample_indices = torch.arange(len(replay_data))
+    if sequence_first:
+        row_positions = positions.repeat_interleave(len(replay_data))
+        row_samples = sample_indices.repeat(len(positions))
+    else:
+        row_positions = positions.repeat(len(replay_data))
+        row_samples = sample_indices.repeat_interleave(len(positions))
+    if sequence_parallel:
+        row_positions = _sequence_parallel_rows(row_positions, parallel_state.tp)
+        row_samples = _sequence_parallel_rows(row_samples, parallel_state.tp)
+
+    _, num_streams, topk = replay_data[0].shape
+    local_rows = replay_data[0].new_full((len(row_positions), num_streams, topk), -1)
+    for sample_index, sample in enumerate(replay_data):
+        holds_sample = (row_samples == sample_index) & (row_positions >= 0) & (row_positions < len(sample))
+        rows = holds_sample.nonzero().squeeze(1)
+        local_rows[rows] = sample[row_positions[rows]]
+    return local_rows
+
+
+def _local_bshd_positions(max_seqlen: int, *, parallel_state: ParallelState, allgather_cp: bool) -> torch.Tensor:
+    """Positions of a padded bshd sample that this context-parallel rank holds; -1 marks zigzag padding."""
+    cp = parallel_state.cp
+    positions = torch.arange(max_seqlen)
+    if cp.size == 1:
+        return positions
+    if allgather_cp:
+        assert max_seqlen % cp.size == 0, f"max_seqlen {max_seqlen} must be divisible by cp_size {cp.size}"
+        local_len = max_seqlen // cp.size
+        return positions[cp.rank * local_len : (cp.rank + 1) * local_len]
+    return slice_with_cp(positions, -1, "bshd", max_seqlen, parallel_state)
+
+
+def _sequence_parallel_rows(rows: torch.Tensor, tp: GroupInfo) -> torch.Tensor:
+    """The rows this tensor-parallel rank holds when sequence parallelism splits the first dimension."""
+    num_rows = rows.size(0)
+    assert num_rows % tp.size == 0
+    width = num_rows // tp.size
+    return rows[width * tp.rank : width * (tp.rank + 1)]

@@ -31,6 +31,11 @@ class Replay:
         buf.copy_(top_indices)
         self.top_indices_list.append(buf)
 
+    def record_without_copy(self, top_indices: torch.Tensor):
+        """Record a host tensor that the caller hands over and never changes again."""
+        assert top_indices.device.type == "cpu", f"record_without_copy takes a host tensor, got {top_indices.device}"
+        self.top_indices_list.append(top_indices)
+
     def pop_forward(self) -> torch.Tensor:
         if self.forward_index >= len(self.top_indices_list):
             shapes = [
@@ -57,6 +62,25 @@ class Replay:
 
     def clear_forward(self):
         self.forward_index = 0
+
+
+def record_streams(replays: list[Replay], replay_data: torch.Tensor, stream_indices: list[int]) -> None:
+    """Record `replay_data[:, stream_indices[i]]` into `replays[i]` through one host buffer.
+
+    One buffer for all replays replaces one per replay, so a micro-batch costs one host allocation, not one per layer.
+    """
+    num_tokens, _, topk = replay_data.shape
+    # pinned like record()'s copies where dynamic shapes mean CUDA; plain host memory on TPU
+    host = torch.empty(
+        (len(stream_indices), num_tokens, topk),
+        dtype=replay_data.dtype,
+        device="cpu",
+        pin_memory=current_platform.dynamic_shapes,
+    )
+    for host_stream, stream_idx in zip(host, stream_indices, strict=True):
+        host_stream.copy_(replay_data[:, stream_idx])
+    for replay, host_stream in zip(replays, host, strict=True):
+        replay.record_without_copy(host_stream)
 
 
 class BaseReplayManager:
