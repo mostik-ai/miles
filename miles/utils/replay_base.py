@@ -69,6 +69,10 @@ class BaseReplayManager:
     # True when a train-data dump keeps the rollout column replay consumed. Only R3 is
     # kept: indexer top-k takes about 0.5 MB per token on DeepSeek-V3.2.
     kept_in_train_dump = False
+    # True when the rows with nothing to replay (all -1: padding, or a sample's final token, which the rollout
+    # never ran) take the indices in turn instead of arange. Routing needs it: arange sends every such row
+    # to experts 0..topk-1, which a single expert-parallel rank holds.
+    unreplayed_rows_take_indices_in_turn = False
 
     def __init__(self):
         self.replays: list[Replay] = []
@@ -111,13 +115,20 @@ class BaseReplayManager:
             if self.enable_check_replay_result:
                 self.check_replay_result(old_topk_fn, scores, topk, top_indices, *args, **kwargs)
 
-            # padding rows (all -1) take arange; branchless so fullgraph traces it
+            # rows with nothing to replay (all -1) are filled; branchless so fullgraph traces it
             all_invalid = (top_indices == -1).all(dim=-1)
-            ar = (
-                torch.arange(top_indices.shape[1], device=top_indices.device, dtype=top_indices.dtype)
-                % scores.shape[1]
-            )
-            top_indices = torch.where(all_invalid.unsqueeze(-1), ar, top_indices)
+            if self.unreplayed_rows_take_indices_in_turn:
+                # the n-th such row takes the next topk indices, wrapping around, so each index gets
+                # the same number of these rows
+                turn = all_invalid.cumsum(dim=0).unsqueeze(-1) - 1
+                slots = torch.arange(topk, device=top_indices.device)
+                fill = ((turn * topk + slots) % scores.shape[1]).to(top_indices.dtype)
+            else:
+                fill = (
+                    torch.arange(top_indices.shape[1], device=top_indices.device, dtype=top_indices.dtype)
+                    % scores.shape[1]
+                )
+            top_indices = torch.where(all_invalid.unsqueeze(-1), fill, top_indices)
 
             if return_probs:
                 return scores.gather(1, top_indices), top_indices
@@ -238,6 +249,7 @@ class RoutingReplayManager(BaseReplayManager):
     enable_check_replay_result = False
     replay_check_max_mismatch_fraction = 1e-2
     kept_in_train_dump = True
+    unreplayed_rows_take_indices_in_turn = True
 
 
 class IndexerReplayManager(BaseReplayManager):
