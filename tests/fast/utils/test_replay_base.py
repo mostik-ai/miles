@@ -72,7 +72,19 @@ def test_the_padding_fill_traces_without_a_graph_break():
     manager = _make_routing_replay_manager(torch.tensor([[-1, -1], [2, 0]], dtype=torch.int32))
     topk_fn = torch.compile(manager.get_topk_fn(_topk, return_probs=False), backend="eager", fullgraph=True)
 
-    torch.testing.assert_close(topk_fn(scores, 2), torch.tensor([[0, 1], [2, 0]], dtype=torch.int32))
+    torch.testing.assert_close(topk_fn(scores, 2), torch.tensor([[1, 3], [2, 0]], dtype=torch.int32))
+
+
+def test_routing_rows_with_nothing_to_replay_take_the_routers_own_topk():
+    """Arange would send every such row to experts 0..topk-1, which a single expert-parallel rank holds."""
+    scores = torch.tensor([[0.1, 0.5, 0.2, 0.9], [0.4, 0.3, 0.2, 0.1]])
+    manager = _make_routing_replay_manager(torch.tensor([[-1, -1], [2, 0]], dtype=torch.int32))
+    topk_fn = manager.get_topk_fn(lambda s, k: torch.topk(s, k, dim=1), return_probs=True)
+
+    probs, top_indices = topk_fn(scores, 2)
+
+    torch.testing.assert_close(top_indices, torch.tensor([[3, 1], [2, 0]], dtype=torch.int32))
+    torch.testing.assert_close(probs, torch.tensor([[0.9, 0.5], [0.2, 0.4]]))
 
 
 def test_a_staged_forward_replays_without_popping(monkeypatch):
