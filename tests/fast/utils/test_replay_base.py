@@ -4,7 +4,7 @@ register_cpu_ci(est_time=60, suite="stage-b-cpu", labels=["replay"])
 
 import torch
 
-from miles.utils.replay_base import BaseReplayManager
+from miles.utils.replay_base import BaseReplayManager, RoutingReplayManager
 
 
 class _FakeReplay:
@@ -51,3 +51,23 @@ def test_get_topk_fn_preserves_partial_padding():
     topk_fn = manager.get_topk_fn(_topk, return_probs=False)
 
     torch.testing.assert_close(topk_fn(scores, 3), replayed_top_indices)
+
+
+def _make_routing_replay_manager(top_indices):
+    manager = RoutingReplayManager()
+    manager.enabled = True
+    manager.stage = "replay_forward"
+    manager.set_current(_FakeReplay(top_indices))
+    return manager
+
+
+def test_routing_rows_with_nothing_to_replay_take_the_routers_own_topk():
+    # arange would send every such row to experts 0..topk-1, which a single expert-parallel rank holds
+    scores = torch.tensor([[0.1, 0.5, 0.2, 0.9], [0.4, 0.3, 0.2, 0.1]])
+    manager = _make_routing_replay_manager(torch.tensor([[-1, -1], [2, 0]], dtype=torch.int32))
+    topk_fn = manager.get_topk_fn(lambda s, k: torch.topk(s, k, dim=1), return_probs=True)
+
+    probs, top_indices = topk_fn(scores, 2)
+
+    torch.testing.assert_close(top_indices, torch.tensor([[3, 1], [2, 0]], dtype=torch.int32))
+    torch.testing.assert_close(probs, torch.tensor([[0.9, 0.5], [0.2, 0.4]]))

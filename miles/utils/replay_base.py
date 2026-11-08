@@ -83,6 +83,10 @@ class BaseReplayManager:
     # True when replayed indices are token/KV positions (indexer): rebase the
     # per-sample 0-based rollout indices onto the packed training sequence.
     replay_indices_are_token_positions = False
+    # True when a row with nothing to replay (all -1: padding, or a sample's final token, which the rollout
+    # never ran) takes the module's own top-k instead of arange. Routing needs it: arange sends every such
+    # row to experts 0..topk-1, which a single expert-parallel rank holds.
+    unreplayed_rows_take_own_topk = False
 
     def __init__(self):
         self.replays: list[Replay] = []
@@ -125,14 +129,18 @@ class BaseReplayManager:
             if self.enable_check_replay_result:
                 self.check_replay_result(old_topk_fn, scores, topk, top_indices, *args, **kwargs)
 
-            # fill padding tokens with arange to avoid invalid reading
+            # rows with nothing to replay are all -1; fill them so no row reads an invalid expert
             all_invalid = (top_indices == -1).all(dim=-1)
             if all_invalid.any():
-                ar = (
-                    torch.arange(top_indices.shape[1], device=top_indices.device, dtype=top_indices.dtype)
-                    % scores.shape[1]
-                )
-                top_indices = torch.where(all_invalid.unsqueeze(-1), ar, top_indices)
+                if self.unreplayed_rows_take_own_topk:
+                    own_topk = old_topk_fn(scores, topk, *args, **kwargs)
+                    fill = (own_topk[1] if return_probs else own_topk).to(top_indices.dtype)
+                else:
+                    fill = (
+                        torch.arange(top_indices.shape[1], device=top_indices.device, dtype=top_indices.dtype)
+                        % scores.shape[1]
+                    )
+                top_indices = torch.where(all_invalid.unsqueeze(-1), fill, top_indices)
 
             if return_probs:
                 return scores.gather(1, top_indices), top_indices
@@ -249,6 +257,7 @@ class RoutingReplayManager(BaseReplayManager):
     if_sp_region = True
     enable_check_replay_result = False
     replay_check_max_mismatch_fraction = 1e-2
+    unreplayed_rows_take_own_topk = True
 
 
 class IndexerReplayManager(BaseReplayManager):
