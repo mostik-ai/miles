@@ -400,6 +400,75 @@ class TestPostProcessRewards:
 
         assert abs(np.std(processed, ddof=1) - 1.0) < 1e-4
 
+    def test_grpo_sqrt_length_reference_gives_each_token_the_root_length_weight(self):
+        lengths = [100, 400, 1600, 6400]
+        rewards = [1.0, 0.0, 0.0, 1.0]
+        reference = 1600
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=True,
+            grpo_sqrt_length_reference=reference,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = [
+            make_sample(group_index=0, index=k, reward=reward, response_length=length)
+            for k, (reward, length) in enumerate(zip(rewards, lengths, strict=True))
+        ]
+
+        out = convert_samples_to_train_data(
+            args,
+            samples,
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        # The denominators the loss and the logs divide by stay each answer's own length.
+        assert out["rollout_mask_sums"] == lengths
+        std_normalized = [0.5 / 0.5773503 if reward else -0.5 / 0.5773503 for reward in rewards]
+        per_token_weights = [advantage / total for advantage, total in zip(out["rewards"], out["rollout_mask_sums"], strict=True)]
+        expected = [advantage / (length * reference) ** 0.5 for advantage, length in zip(std_normalized, lengths, strict=True)]
+        assert per_token_weights == pytest.approx(expected, rel=1e-4)
+
+    def test_grpo_sqrt_length_reference_measures_a_rollout_across_its_segments(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=False,
+            grpo_sqrt_length_reference=1600,
+            n_samples_per_prompt=2,
+            rollout_batch_size=1,
+        )
+        samples = [
+            make_sample(group_index=0, index=0, reward=1.0, response_length=300, rollout_id=7),
+            make_sample(group_index=0, index=1, reward=1.0, response_length=100, rollout_id=7),
+            make_sample(group_index=0, index=2, reward=0.0, response_length=1600, rollout_id=8),
+        ]
+
+        _, processed = _post_process_rewards(
+            args, samples, custom_reward_post_process_func=None, prompt_group_sizes=[3]
+        )
+
+        assert processed == pytest.approx([0.5 * 0.5, 0.5 * 0.5, -0.5], abs=1e-4)
+
+    @pytest.mark.parametrize("reward", [0.0, 1.0])
+    def test_grpo_sqrt_length_reference_leaves_a_uniform_group_at_zero(self, reward):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=True,
+            grpo_sqrt_length_reference=1600,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[reward] * 4, response_length=400)
+
+        _, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
+        assert processed == [0.0] * 4
+
     def test_gspo_uses_grpo_normalization_path(self):
         args = make_args(
             advantage_estimator="gspo",

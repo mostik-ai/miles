@@ -368,6 +368,11 @@ def _normalize_rewards_by_rollout(
         for (_, rollout_segments), normalized_reward in zip(
             rollout_segment_groups, normalized_rollout_rewards.tolist(), strict=True
         ):
+            if args.grpo_sqrt_length_reference is not None:
+                # The loss divides each answer's token losses by the answer's length, so this leaves every token a
+                # weight of 1 / sqrt(length * reference): an answer's gradient noise stops depending on its length.
+                length = sum(samples[segment_index].response_length for segment_index in rollout_segments)
+                normalized_reward *= (length / args.grpo_sqrt_length_reference) ** 0.5
             for segment_index in rollout_segments:
                 normalized_rewards[segment_index] = normalized_reward
 
