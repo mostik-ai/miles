@@ -1790,6 +1790,12 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
             )
             parser.add_argument(
+                "--grpo-sqrt-success-normalization",
+                action="store_true",
+                default=False,
+                help="Divide each group's advantages by the square root of its success rate, instead of its std.",
+            )
+            parser.add_argument(
                 "--disable-rewards-normalization",
                 action="store_false",
                 dest="rewards_normalization",

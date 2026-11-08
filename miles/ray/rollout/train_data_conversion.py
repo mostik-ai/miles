@@ -360,10 +360,12 @@ def _normalize_rewards_by_rollout(
 
         rollout_rewards = torch.tensor(shared_rewards, dtype=torch.float)
         normalized_rollout_rewards = rollout_rewards - rollout_rewards.mean()
-        if args.advantage_estimator in ["grpo", "gspo"] and args.grpo_std_normalization and len(rollout_rewards) > 1:
-            rollout_std = rollout_rewards.std()
-            if rollout_std > 0:
-                normalized_rollout_rewards = normalized_rollout_rewards / (rollout_std + 1e-6)
+        if args.advantage_estimator in ["grpo", "gspo"] and len(rollout_rewards) > 1 and rollout_rewards.std() > 0:
+            if args.grpo_sqrt_success_normalization:
+                # 1/sqrt(p) climbs sqrt(p): it holds the pull near p=0, and near p=1 lets it fade as plain p does
+                normalized_rollout_rewards = normalized_rollout_rewards / (rollout_rewards.mean().sqrt() + 1e-6)
+            elif args.grpo_std_normalization:
+                normalized_rollout_rewards = normalized_rollout_rewards / (rollout_rewards.std() + 1e-6)
 
         for (_, rollout_segments), normalized_reward in zip(
             rollout_segment_groups, normalized_rollout_rewards.tolist(), strict=True
