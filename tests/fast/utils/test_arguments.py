@@ -3854,6 +3854,17 @@ class TestMilesValidateArgsCheckpointResolution:
         assert not hasattr(args, "exit_on_missing_checkpoint")
 
 
+def test_the_routing_replay_expert_load_log_is_off_unless_asked_for() -> None:
+    parser = argparse.ArgumentParser()
+    get_miles_extra_args_provider()(parser)
+
+    without_option, _ = parser.parse_known_args(REQUIRED_ARGS)
+    with_option, _ = parser.parse_known_args(["--log-routing-replay-expert-load", *REQUIRED_ARGS])
+
+    assert without_option.log_routing_replay_expert_load is False
+    assert with_option.log_routing_replay_expert_load is True
+
+
 class TestWeightTransferModeSelection:
     def _parse(self, extra=()):
         parser = get_megatron_arg_parser()
