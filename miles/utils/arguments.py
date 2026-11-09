@@ -141,6 +141,10 @@ def _resolve_rollout_functions(args) -> None:
                 "continuously and each step drains --rollout-batch-size of them. "
                 "Use --async-max-concurrent-samples to control how many samples are in flight."
             )
+        if args.group_first_stage_samples is not None:
+            validate_group_first_stage_samples(args)
+    else:
+        assert args.group_first_stage_samples is None, "--group-first-stage-samples needs --fully-async"
 
     user_eval_path = args.eval_function_path
     args.rollout_function_path, args.eval_function_path = resolve_rollout_function_paths(args)
@@ -155,6 +159,18 @@ def _resolve_rollout_functions(args) -> None:
         args.eval_num_gpus > 0 and _compute_rollout_external(args)
     ), "eval_num_gpus cannot be set with external rollout engines."
     args.eval_uses_snapshots = args.eval_num_gpus > 0 or checkpoint_backend
+
+
+def validate_group_first_stage_samples(args) -> None:
+    option = "--group-first-stage-samples"
+    assert 1 <= args.group_first_stage_samples < args.n_samples_per_prompt, f"{option} must leave a later stage"
+    assert not args.group_rm, f"{option} reads each reward as its sample finishes"
+    assert (
+        args.async_unused_samples_handler == "drop"
+    ), f"{option} needs the drop handler: the retry handler would regenerate an abandoned prompt at once"
+    assert (
+        not args.sglang_enable_deterministic_inference
+    ), f"{option}: a later stage would repeat the first stage's seeds"
 
 
 def reset_arg(parser, name, **kwargs):
@@ -932,6 +948,17 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                     "Groups exceeding this threshold are recycled back to "
                     "the data buffer instead of being sent to training. Only effective in fully "
                     "async mode. None (default) disables staleness filtering."
+                ),
+            )
+            parser.add_argument(
+                "--group-first-stage-samples",
+                type=int,
+                default=None,
+                help=(
+                    "In fully async training, generate only this many samples of a group first, abandon the group "
+                    "when none of them earned a reward, and generate the rest otherwise. None generates the whole "
+                    "group at once. The later stage counts against --async-max-concurrent-samples without waiting "
+                    "for room, so the samples in flight can briefly exceed it."
                 ),
             )
             parser.add_argument(

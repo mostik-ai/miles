@@ -19,6 +19,7 @@ rollout engines, pausing producer submissions for the duration of the
 import asyncio
 import copy
 import logging
+from argparse import Namespace
 from collections import deque
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -154,22 +155,48 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
 
     def _submit_one_group(self) -> asyncio.Task:
         samples = [self._retry_buffer.popleft()] if self._retry_buffer else self.data_source.get_samples(1)
-        stamp_kv_cache_namespace(samples, namespace=self._curr_kv_cache_namespace)
-        self._scheduler.on_submit(samples)
         [prompt_group] = samples
+        self._start_samples(self._first_stage(prompt_group))
         task = asyncio.create_task(self._generate_group(prompt_group))
         self._running_tasks.append(_RunningTask(prompt_group=prompt_group, task=task))
         return task
 
-    async def _generate_group(self, prompt_group: list[Sample]) -> DataBufferInput:
-        result = await generate_and_rm_group(
+    def _first_stage(self, prompt_group: list[Sample]) -> list[Sample]:
+        first_stage = self.args.group_first_stage_samples
+        return prompt_group if first_stage is None else prompt_group[:first_stage]
+
+    def _start_samples(self, samples: list[Sample]) -> None:
+        """A slot is held only while its sample generates, so the budget stays a count of running generations."""
+        stamp_kv_cache_namespace(samples, namespace=self._curr_kv_cache_namespace)
+        self._scheduler.on_submit([samples])
+
+    async def _generate_samples(self, samples: list[Sample]) -> list[Sample]:
+        return await generate_and_rm_group(
             self.state,
-            prompt_group,
+            samples,
             sampling_params=self.state.sampling_params.copy(),
             evaluation=False,
             sample_done_callback=self._scheduler.sample_done_callback,
         )
-        return DataBufferInput(prompt_group=prompt_group, group=result)
+
+    async def _generate_group(self, prompt_group: list[Sample]) -> DataBufferInput:
+        first_stage = self._first_stage(prompt_group)
+        later_stage = prompt_group[len(first_stage) :]
+        group = await self._generate_samples(first_stage)
+        if not later_stage:
+            return DataBufferInput(prompt_group=prompt_group, group=group)
+        aborted = any(sample.status == Sample.Status.ABORTED for sample in group)
+        if aborted or not _first_stage_earned_reward(self.args, group):
+            # The aborted status sends the group to the buffer's unused path; the later samples never ran.
+            group = [replace(sample, status=Sample.Status.ABORTED) for sample in [*group, *later_stage]]
+            # an abort says nothing about how hard the prompt is, so only a group that earned nothing is reported
+            observe_abandoned = getattr(self.data_source, "observe_abandoned", None)
+            if not aborted and observe_abandoned is not None:
+                observe_abandoned(prompt_group)
+        else:
+            self._start_samples(later_stage)
+            group = [*group, *await self._generate_samples(later_stage)]
+        return DataBufferInput(prompt_group=prompt_group, group=group)
 
     async def _worker_loop(self) -> None:
         active: set[asyncio.Task] = set()
@@ -277,6 +304,10 @@ class FullyAsyncRolloutFn(BaseRolloutFn):
         assert not self._retry_buffer, "restore the fully async rollout state before any group was recycled"
         self._retry_buffer = deque([*state.retry_buffer, *state.running])
         self._output.load_state_dict(state.output)
+
+
+def _first_stage_earned_reward(args: Namespace, samples: list[Sample]) -> bool:
+    return any(sample.reward is not None and (sample.get_reward_value(args) or 0) > 0 for sample in samples)
 
 
 @dataclass(frozen=True)
