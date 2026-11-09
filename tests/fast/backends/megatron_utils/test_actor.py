@@ -134,6 +134,27 @@ def test_actor_ref_actor_switch_restores_model_companion(
     assert torch.equal(weight, torch.tensor([2.0]))
 
 
+def test_a_train_step_finalizes_the_background_saves_that_have_finished(
+    actor_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A finished background save becomes the checkpoint a resume loads at the next train step, not at the next save,
+    and the step never waits on a save still writing."""
+    train_actor = object.__new__(actor_module.MegatronTrainRayActor)
+    train_actor.args = Namespace(async_save=True, offload_train=False, debug_rollout_only=True)
+    train_actor._heartbeat = Mock()
+    finalized: list[bool] = []
+    monkeypatch.setattr(actor_module, "maybe_finalize_async_save", lambda blocking: finalized.append(blocking))
+    monkeypatch.setattr(
+        actor_module, "get_parallel_state", lambda: SimpleNamespace(train_parallel_config=lambda **_kwargs: None)
+    )
+    monkeypatch.setattr(actor_module, "get_rollout_data", lambda **_kwargs: (object(), nullcontext()))
+    monkeypatch.setattr(actor_module, "log_rollout_data", lambda *_args: None)
+
+    train_actor.train(rollout_id=3, rollout_data_ref=object())
+
+    assert finalized == [False]
+
+
 class TestSendCheckpoint:
     def test_healing_before_the_first_train_step_is_refused_without_sending(
         self, actor_module: ModuleType, monkeypatch: pytest.MonkeyPatch
