@@ -15,7 +15,8 @@ from megatron.core.utils import unwrap_model
 # TODO: may need to copy those 2 functions and do refactoring.
 from megatron.training.checkpointing import get_checkpoint_name
 from megatron.training.checkpointing import load_checkpoint as _load_checkpoint_megatron
-from megatron.training.checkpointing import save_checkpoint
+from megatron.training.checkpointing import save_checkpoint as _save_checkpoint_megatron
+from torch.multiprocessing import reductions
 from torch.serialization import safe_globals
 
 from miles.backends.megatron_utils.megatron_config import MegatronArgsNamespace, has_hf_checkpoint
@@ -180,6 +181,32 @@ def load_checkpoint(
     ModelCompanionSampleConsumptionUtils.clear_for_finetune(ddp_model, args=args.backend)
 
     return _CheckpointLoadResult(iteration=result_iteration, restored_trained_iteration=restored_trained_iteration)
+
+
+def save_checkpoint(*args: Any, **kwargs: Any) -> None:
+    """Megatron's save_checkpoint, run with torch's own tensor reducers.
+
+    Weight updates apply SGLang's monkey_patch_torch_reductions and leave it on. Megatron's persistent async-save
+    worker never applies it, and an async save scheduled under it waits for that worker forever; Megatron puts
+    torch's reducers back only for the tensors it restages for CUDA IPC."""
+    with _torch_tensor_reducers():
+        _save_checkpoint_megatron(*args, **kwargs)
+
+
+@contextmanager
+def _torch_tensor_reducers():
+    if not hasattr(reductions, "_reduce_tensor_original"):  # config-access-exempt: set once SGLang patches torch
+        yield
+        return
+    patched = reductions.reduce_tensor, reductions.rebuild_cuda_tensor
+    reductions.reduce_tensor = reductions._reduce_tensor_original
+    reductions.rebuild_cuda_tensor = reductions._rebuild_cuda_tensor_original
+    reductions.init_reductions()
+    try:
+        yield
+    finally:
+        reductions.reduce_tensor, reductions.rebuild_cuda_tensor = patched
+        reductions.init_reductions()
 
 
 def publish_as_release(save_dir: str) -> None:
