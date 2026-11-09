@@ -75,13 +75,14 @@ def test_bridge_preserves_names_without_checkpoint_metadata(tmp_path, caplog):
 
 @pytest.mark.parametrize("native_names", [True, False])
 @pytest.mark.parametrize("plain_export", [True, False])
-def test_bridge_canonicalizes_names_before_postprocessing(native_names, plain_export, monkeypatch):
+@pytest.mark.parametrize("merged", [True, False])
+def test_bridge_canonicalizes_names_before_postprocessing(native_names, plain_export, merged, monkeypatch):
     weight = object()
     megatron_name = "decoder.layers.0.self_attention.linear_q_down_proj.weight"
     hf_name = "model.layers.0.self_attn.wq_a.weight"
     source_name = "layers.0.attn.wq_a.weight" if native_names else hf_name
     iterator = object.__new__(HfWeightIteratorBridge)
-    iterator.args = Namespace(params_dtype=torch.bfloat16)
+    iterator.args = Namespace(params_dtype=torch.bfloat16, lora_merged_rollout=merged)
     iterator.quantization_config = None
     iterator.model = []
     iterator._export_dtypes = None
@@ -95,6 +96,7 @@ def test_bridge_canonicalizes_names_before_postprocessing(native_names, plain_ex
         monkeypatch.setattr(bridge_iterator, "get_parallel_state", lambda: Namespace(pp=Namespace(size=1)))
 
         def export_hf_weights(model, *, conversion_tasks, weight_dtype=None, **kwargs):
+            assert kwargs["merge_adapter_weights"] is merged
             assert weight_dtype is None
             assert all(task.weight_dtype == torch.bfloat16 for task in conversion_tasks)
             return iter([(source_name, weight, megatron_name)])
@@ -114,6 +116,8 @@ def test_bridge_canonicalizes_names_before_postprocessing(native_names, plain_ex
     assert list(iterator._iter_hf_param_units({}, materialize=True)) == [[(hf_name, weight)]]
     assert received == [(hf_name, weight, megatron_name)]
     iterator._remap_hf_name.assert_called_once_with(source_name)
+    if not plain_export:
+        assert iterator._bridge.export_hf_weights.call_args.kwargs["merge_adapter_weights"] is merged
 
 
 def test_bridge_canonicalizes_adapter_names_before_postprocessing(monkeypatch):

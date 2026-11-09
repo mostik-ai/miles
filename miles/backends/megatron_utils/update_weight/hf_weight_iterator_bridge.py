@@ -68,7 +68,9 @@ class HfWeightIteratorBridge(MegatronHfWeightIteratorBase):
                 self.model,
                 cpu=False,
                 conversion_tasks=conversion_tasks,
-                merge_adapter_weights=False,
+                # Only weight sync streams the base in bridge mode (HF saves call save_hf_pretrained), so merging
+                # here cannot double-count the adapter that snapshots write beside it.
+                merge_adapter_weights=getattr(self.args, "lora_merged_rollout", False),
                 **self._source_name_kwargs(self._bridge.export_hf_weights),
             )
 
