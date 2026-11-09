@@ -56,6 +56,7 @@ def _args(**overrides) -> Namespace:
         lora_dropout=0.0,
         lora_adapter_path=None,
         lora_train_only=False,
+        lora_merged_rollout=False,
         colocate_memory_peak_device="cpu",
         # read by the padded-rows loss layout's startup check on a static-shape platform
         train_backend="torchtitan",
@@ -378,6 +379,7 @@ def test_lora_targets_bypass_megatrons_native_spec(monkeypatch):
         lora_checkpoint_format="adapter",
         lora_adapter_path=None,
         lora_adapter_convert_save=None,
+        lora_merged_rollout=False,
         lora_type="lora",
         target_modules="q_proj",
         exclude_modules=None,
