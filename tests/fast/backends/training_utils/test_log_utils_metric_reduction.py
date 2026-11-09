@@ -139,8 +139,12 @@ def test_log_multi_turn_data_passes_explicit_extrema_reductions(monkeypatch):
 
 
 class TestLogRolloutDataCountShare:
-    def test_the_count_share_divides_by_the_effective_dp_size(self, monkeypatch):
-        """Independent cells gather over effective_dp_cp, so the per-cell count must be num_rollouts / live cells."""
+    @pytest.mark.parametrize(("skip_zero_advantage_samples", "expected_count"), [(False, 256 / 3), (True, 1)])
+    def test_the_count_share_is_what_each_cells_mean_covers(
+        self, monkeypatch, skip_zero_advantage_samples, expected_count
+    ):
+        """Independent cells gather over effective_dp_cp, so the per-cell count is num_rollouts / live cells, unless
+        samples are skipped: then each cell's mean covers only the samples it computed."""
         captured = {}
         parallel_state = SimpleNamespace(
             tp=SimpleNamespace(rank=0),
@@ -172,10 +176,11 @@ class TestLogRolloutDataCountShare:
                 log_multi_turn=False,
                 log_passrate=False,
                 log_correct_samples=False,
+                skip_zero_advantage_samples=skip_zero_advantage_samples,
             ),
             rollout_data,
         )
 
         per_rank_sum, count = captured["log_dict"]["log_probs"]
         assert per_rank_sum == pytest.approx(-2.0)
-        assert count == pytest.approx(256 / 3)
+        assert count == pytest.approx(expected_count)
