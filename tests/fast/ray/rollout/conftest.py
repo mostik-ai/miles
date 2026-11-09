@@ -57,6 +57,7 @@ def make_args(**overrides: Any) -> Namespace:
         use_dynamic_global_batch_size=False,
         wandb_always_use_train_step=False,
         disable_rollout_trim_samples=False,
+        skip_zero_advantage_samples=False,
         balance_data=False,
         delay_split_train_data_by_dp=False,
         # object store
