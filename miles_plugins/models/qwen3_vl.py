@@ -118,6 +118,9 @@ def _patch_model_forward_and_rope_index() -> None:
         ctx = _prepare_cp_local_context(parsed)
         if packed is not None:
             _tls.packed_positions = packed
+            # newer bridges refuse pre-sharded CP input before computing positions, so they get them explicitly
+            if kwargs.get("position_ids") is None:
+                kwargs["position_ids"] = packed
         if ctx is not None:
             _tls.cp_local = ctx
         try:

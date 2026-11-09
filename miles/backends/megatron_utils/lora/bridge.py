@@ -27,7 +27,7 @@ from miles.backends.training_utils.model_companion import ModelCompanionInstalla
 from miles.utils.hf_utils.config import load_hf_config
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
 from miles.utils.lora.utils import is_multi_lora_enabled, targets_expert_leaves
-from miles.utils.megatron_bridge_utils import apply_dsa_backend_args
+from miles.utils.megatron_bridge_utils import apply_cp_comm_type, apply_dsa_backend_args
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +159,7 @@ def _setup_lora_model_via_bridge(args: Namespace) -> list:
     provider.sequence_parallel = args.sequence_parallel
     provider.virtual_pipeline_model_parallel_size = args.virtual_pipeline_model_parallel_size
     provider.context_parallel_size = args.context_parallel_size
+    apply_cp_comm_type(provider, args)
     provider.gradient_accumulation_fusion = args.gradient_accumulation_fusion
     provider.recompute_granularity = args.recompute_granularity
     provider.recompute_method = args.recompute_method
