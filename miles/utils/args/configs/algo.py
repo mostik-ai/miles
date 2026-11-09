@@ -205,6 +205,17 @@ class AlgoConfig(BaseConfig):
             )
         ),
     ] = False
+    skip_zero_advantage_samples: A[
+        bool,
+        Arg(
+            help=(
+                "Leave samples whose advantage is exactly zero out of training. They add exactly zero gradient, "
+                "so the update stays the same, up to rounding, while the trainer computes less: the loss still "
+                "divides by the whole batch, and an all-zero batch still steps the optimizer on the shortest "
+                "samples. Training metrics, tokens/s, TFLOPs and MFU then cover only the samples computed."
+            )
+        ),
+    ] = False
     # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
     use_tis: A[
         bool,
