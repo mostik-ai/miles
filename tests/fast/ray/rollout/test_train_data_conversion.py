@@ -422,6 +422,22 @@ class TestPostProcessRewards:
 
         assert processed == pytest.approx([right if reward else wrong for reward in rewards], abs=1e-4)
 
+    def test_grpo_sqrt_length_reference_scales_each_answer_by_the_root_of_its_length(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_sqrt_length_reference=100,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[1.0, 0.0, 0.0, 0.0])
+        for sample, length in zip(samples, [100, 400, 25, 100], strict=True):
+            sample.response_length = length
+
+        _, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
+        assert processed == pytest.approx([0.75, -0.25 * 2, -0.25 * 0.5, -0.25], abs=1e-6)
+
     def test_grpo_sqrt_success_normalization_refuses_a_negative_reward(self):
         args = make_args(
             advantage_estimator="grpo",
