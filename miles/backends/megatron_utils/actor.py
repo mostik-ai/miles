@@ -99,6 +99,7 @@ from .named_weights import named_params_and_buffers
 from .optimizer_utils import reset_optimizer_state
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import register_replay_list_moe
+from .te_a2a_reorder import patch_te_a2a_reorder
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
@@ -141,6 +142,8 @@ class MegatronTrainRayActor(TrainRayActor):
         monkey_patch_torch_dist()
         patch_flash_attn_4_window()
         patch_flash_attn_4_ulysses()
+        if args.reorder_ulysses_chunks_on_host:
+            patch_te_a2a_reorder()
 
         self._last_rollout_id: int | None = None
         self._cell_index = indep_dp_info.cell_index

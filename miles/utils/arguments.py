@@ -642,6 +642,13 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 ),
             )
             parser.add_argument(
+                "--reorder-ulysses-chunks-on-host",
+                action="store_true",
+                default=False,
+                help="Build Transformer Engine's Ulysses chunk-reorder indices from host integers, once per "
+                "micro-batch, instead of from GPU scalars in every attention call.",
+            )
+            parser.add_argument(
                 "--indep-dp",
                 action="store_true",
                 default=False,
