@@ -72,6 +72,9 @@ def validate_lora_args(args):
         "megatron",
         "torchtitan",
     ), f"LoRA injection is not implemented for --train-backend {args.train_backend}; use megatron or torchtitan"
+    assert (
+        args.train_backend == "megatron" or args.lora_checkpoint_format == "adapter"
+    ), "--lora-checkpoint-format torch_dist saves Megatron's checkpoint, so it needs --train-backend megatron"
     assert args.lora_rank > 0, "LoRA requires a positive --lora-rank, including when loading an adapter"
     hf_config = load_hf_config(args.hf_checkpoint)
     args.hf_lora_targets = _resolve_lora_targets(args, hf_config)
@@ -187,6 +190,15 @@ def _default_lora_type(args) -> str:
 def validate_lora_args_after_megatron(args):
     """Checks that need Megatron's resolved args or the resolved eval-snapshot setting: Bridge LoRA's HF-export
     layout, and the targets native (raw-mode) LoRA's spec serves."""
+    if is_lora_enabled(args) and args.lora_checkpoint_format == "torch_dist":
+        assert args.megatron_to_hf_mode == "bridge", (
+            "--lora-checkpoint-format torch_dist needs --megatron-to-hf-mode bridge: native adapters keep out of "
+            "Megatron's sharded state, so its checkpoint would hold the frozen model without them"
+        )
+        assert not args.multi_lora, "--lora-checkpoint-format torch_dist saves one adapter, not slots"
+        assert (
+            args.ckpt_format == "torch_dist"
+        ), "--lora-checkpoint-format torch_dist saves in Megatron's --ckpt-format, so it needs --ckpt-format torch_dist"
     # save() writes a LoRA model to its adapter dir, never into the in-memory checkpoint a heal or rollback restores
     if is_lora_enabled(args) and not args.multi_lora and not args.debug_rollout_only:
         assert not args.indep_dp and args.non_persistent_ckpt_type != "local", (
@@ -214,9 +226,10 @@ def validate_lora_args_after_megatron(args):
 
 def _validate_adapter_state_args(args) -> None:
     """adapter_state/ holds Adam's fp32 master, fp32 moments and step, gathered whole per DP group over Gloo."""
-    if args.save is None and args.lora_adapter_path is None:
+    saves_adapter = args.save is not None and args.lora_checkpoint_format == "adapter"
+    if not saves_adapter and args.lora_adapter_path is None:
         return
-    assert not args.debug_disable_optimizer or (args.save is None and args.lora_adapter_convert_save is None), (
+    assert not args.debug_disable_optimizer or (not saves_adapter and args.lora_adapter_convert_save is None), (
         "--save / --lora-adapter-convert-save store the adapter's fp32 optimizer masters, which "
         "--debug-disable-optimizer does not build; drop one of them"
     )
