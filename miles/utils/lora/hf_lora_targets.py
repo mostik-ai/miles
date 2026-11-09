@@ -162,9 +162,9 @@ def _qwen_moe_mlp_targets(config, *, shared_expert=False):
     return tuple(mlp)
 
 
-def _hybrid_attention_targets(config, linear_attention):
+def _hybrid_attention_targets(config, linear_attention, softmax_attention="full_attention"):
     attention = []
-    if "full_attention" in config["layer_types"]:
+    if softmax_attention in config["layer_types"]:
         attention.extend(_QKVO_ATTENTION)
     if "linear_attention" in config["layer_types"]:
         attention.extend(linear_attention)
@@ -183,11 +183,21 @@ def _qwen3_5_targets(config):
     return _hybrid_attention_targets(config, _GDN_35), _DENSE_MLP
 
 
-def _qwen3_5_moe_targets(config):
+def _qwen3_5_moe_mlp_targets(config):
     mlp = _PACKED_EXPERTS
     if config["shared_expert_intermediate_size"]:
         mlp += _QWEN_SHARED_EXPERT
-    return _hybrid_attention_targets(config, _GDN_35), mlp
+    return mlp
+
+
+def _qwen3_5_moe_targets(config):
+    return _hybrid_attention_targets(config, _GDN_35), _qwen3_5_moe_mlp_targets(config)
+
+
+def _qwen4_exp_targets(config):
+    # Transformers' Qwen4Exp config renames the checkpoint's full_attention (QSA) layers to indexed_attention
+    attention = _hybrid_attention_targets(config, _GDN_35, softmax_attention="indexed_attention")
+    return attention, _qwen3_5_moe_mlp_targets(config)
 
 
 def _inkling_targets(config):
@@ -221,6 +231,10 @@ _HF_LORA_MODELS = {
     ),
     "qwen3_5_moe": _HfLoraModelSpec(
         _qwen3_5_moe_targets, layer_prefix="model.language_model.layers.*", unwrap_text_config=True
+    ),
+    # Qwen3.8-Flash-Next keeps Qwen3.5's projection names; its QSA indexer and hyper-connections get no adapters
+    "qwen4_exp": _HfLoraModelSpec(
+        _qwen4_exp_targets, layer_prefix="model.language_model.layers.*", unwrap_text_config=True
     ),
     "gpt_oss": _HfLoraModelSpec(_gpt_oss_targets),
     "deepseek_v2": _HfLoraModelSpec(_deepseek_targets),

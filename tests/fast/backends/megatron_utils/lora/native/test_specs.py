@@ -68,6 +68,9 @@ def _qwen3_modules(num_layers=2):
     ]
 
 
+_QWEN3_8_FLASH_NEXT = {"model_type": "qwen4_exp", "text_config": {"model_type": "qwen4_exp_text"}}
+
+
 class TestResolveAdapterTargets:
     """Arg-time contract: HF targets from #3318's resolution, validated against the native spec."""
 
@@ -98,12 +101,22 @@ class TestResolveAdapterTargets:
         targets = [f"model.layers.*.mlp.shared_experts.{leaf}" for leaf in ("gate_proj", "up_proj", "down_proj")]
         assert resolve_adapter_targets({"model_type": "glm4_moe"}, targets, hf_modules=[]) == targets
 
+    def test_qwen3_8_flash_next_adapts_its_full_attention_layers_and_shared_expert(self):
+        """Its outer model_type resolves the hybrid spec; the QSA layers keep MCore's fused qkv and o_proj."""
+        prefix = "model.language_model.layers.*"
+        targets = [f"{prefix}.self_attn.{leaf}" for leaf in ("q_proj", "k_proj", "v_proj", "o_proj")]
+        targets += [f"{prefix}.mlp.shared_expert.{leaf}" for leaf in ("gate_proj", "up_proj", "down_proj")]
+        assert resolve_adapter_targets(_QWEN3_8_FLASH_NEXT, targets, hf_modules=[]) == targets
+
     @pytest.mark.parametrize(
         "model_type,target",
         [
             ("qwen3_moe", "model.layers.*.mlp.experts.gate_up_proj"),
             ("kimi_k2", "model.layers.*.mlp.experts.*.gate_proj"),
             ("qwen3_5", "model.language_model.layers.*.linear_attn.in_proj_qkv"),
+            ("qwen4_exp", "model.language_model.layers.*.linear_attn.in_proj_qkv"),
+            ("qwen4_exp", "model.language_model.layers.*.mlp.experts.gate_up_proj"),
+            ("qwen4_exp", "model.language_model.layers.*.self_attn.indexer.index_qk_proj"),
         ],
     )
     def test_unimplemented_projections_fail_closed(self, model_type, target):

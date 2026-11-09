@@ -64,6 +64,28 @@ def test_fused_qkv_and_gate_up_are_named_per_projection_from_their_global_shape(
     assert naming.block_prefix(layer, fc1, ["gate_proj", "up_proj"]) == "model.layers.3.mlp."
 
 
+def test_qwen3_8_flash_next_names_its_qsa_attention_and_shared_expert_as_qwen3_5_does():
+    """The gated fused qkv carries a gate row per query row: global (4*2 + 2 + 2) * 2 = 24 rows, 12 at TP=2."""
+    layer = _layer(
+        4,
+        self_attention__linear_qkv__weight=((12, 8), 0, False),
+        self_attention__linear_proj__weight=((8, 4), 1, False),
+        mlp__shared_experts__linear_fc1__weight=((6, 8), 0, False),
+        mlp__shared_experts__linear_fc2__weight=((8, 3), 1, False),
+    )
+    naming = ConverterNaming(_GQA_ARGS, "qwen4_exp", tp_size=2, is_hf_name=_ANY)
+    prefix = "model.language_model.layers.3."
+
+    qkv = _weight(layer, "self_attention__linear_qkv__weight")
+    assert naming.block_prefix(layer, qkv, ["q_proj", "k_proj", "v_proj"]) == f"{prefix}self_attn."
+    proj = _weight(layer, "self_attention__linear_proj__weight")
+    assert naming.block_prefix(layer, proj, ["o_proj"]) == f"{prefix}self_attn."
+    fc1 = _weight(layer, "mlp__shared_experts__linear_fc1__weight")
+    assert naming.block_prefix(layer, fc1, ["gate_proj", "up_proj"]) == f"{prefix}mlp.shared_expert."
+    fc2 = _weight(layer, "mlp__shared_experts__linear_fc2__weight")
+    assert naming.block_prefix(layer, fc2, ["down_proj"]) == f"{prefix}mlp.shared_expert."
+
+
 def test_a_spec_that_disagrees_with_the_converter_fails():
     """GLM-4 keeps gate/up fused in HF: split adapters would be saved under names HF GLM-4 has no module for."""
     layer = _layer(1, mlp__linear_fc1__weight=((12, 8), 0, False))

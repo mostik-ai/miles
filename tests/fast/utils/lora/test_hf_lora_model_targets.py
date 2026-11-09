@@ -27,6 +27,7 @@ _NATIVE_MODELS = (
     "qwen3_5_moe_text",
     "qwen3_5",
     "qwen3_5_moe",
+    "qwen4_exp",
     "gpt_oss",
     "deepseek_v2",
     "deepseek_v3",
@@ -34,7 +35,7 @@ _NATIVE_MODELS = (
     "glm_moe_dsa",
     "glm5_next",
 )
-_MULTIMODAL_MODELS = {"qwen3_5", "qwen3_5_moe", "glm5_next"}
+_MULTIMODAL_MODELS = {"qwen3_5", "qwen3_5_moe", "qwen4_exp", "glm5_next"}
 
 
 def _small_config(model_type, overrides):
@@ -48,19 +49,23 @@ def _small_config(model_type, overrides):
         head_dim=8,
         max_position_embeddings=64,
     )
-    if model_type in {"qwen3_moe", "qwen3_next", "qwen3_5_moe_text", "qwen3_5_moe"}:
+    if model_type in {"qwen3_moe", "qwen3_next", "qwen3_5_moe_text", "qwen3_5_moe", "qwen4_exp"}:
         text.update(num_experts=2, num_experts_per_tok=1, moe_intermediate_size=16)
     if model_type in {"qwen3_moe", "qwen3_next"}:
         text.update(decoder_sparse_step=2, mlp_only_layers=[])
-    if model_type in {"qwen3_next", "qwen3_5_moe_text", "qwen3_5_moe"}:
+    if model_type in {"qwen3_next", "qwen3_5_moe_text", "qwen3_5_moe", "qwen4_exp"}:
         text.update(shared_expert_intermediate_size=16)
-    if model_type == "qwen3_next" or model_type.startswith("qwen3_5"):
+    if model_type in {"qwen3_next", "qwen4_exp"} or model_type.startswith("qwen3_5"):
         text.update(
             layer_types=["linear_attention", "full_attention"],
             linear_key_head_dim=8,
             linear_value_head_dim=8,
             linear_num_key_heads=2,
             linear_num_value_heads=4,
+        )
+    if model_type == "qwen4_exp":
+        text.update(
+            indexer_n_heads=2, indexer_kv_heads=1, indexer_head_dim=8, indexer_budget=8, indexer_compress_ratio=4
         )
     if model_type == "gpt_oss":
         text.update(num_local_experts=2, num_experts_per_tok=1)
@@ -184,6 +189,18 @@ def test_targets_match_native_hf_model(model_type, overrides):
     assert set(defaults) == set(layout.attention + layout.mlp)
     all_groups = resolve_hf_lora_targets(config.to_dict(), target_modules=["attn", "mlp", "unembed"])
     assert set(all_groups) == set(layout.attention + layout.mlp + layout.unembed)
+
+
+def test_qwen4_exp_selects_the_qsa_layers_that_transformers_renames_to_indexed_attention():
+    """The checkpoint's config calls these layers full_attention; Transformers' config class renames them."""
+    config = _small_config("qwen4_exp", {})
+    assert config.text_config.layer_types == ["linear_attention", "indexed_attention"]
+
+    attention = get_hf_lora_targets(config.to_dict()).attention
+
+    prefix = "model.language_model.layers.*"
+    assert {f"{prefix}.self_attn.{leaf}" for leaf in ("q_proj", "k_proj", "v_proj", "o_proj")} <= set(attention)
+    assert f"{prefix}.linear_attn.in_proj_qkv" in attention
 
 
 @pytest.mark.parametrize("launcher", ["run_glm5_1_744b_a40b_lora", "run_glm5_2_744b_a40b_lora"])

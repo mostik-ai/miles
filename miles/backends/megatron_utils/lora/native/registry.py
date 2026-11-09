@@ -115,6 +115,8 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
         "qwen3_6": hybrid,
         "qwen3_6_moe": hybrid,
         "qwen3_next": hybrid,
+        # Qwen3.8-Flash-Next: the QSA layers keep MCore's fused linear_qkv and linear_proj; GDN layers are skipped
+        "qwen4_exp": hybrid,
         "deepseek_v3": mla,
         "deepseek_v32": mla,
         "glm4_moe_lite": mla,
