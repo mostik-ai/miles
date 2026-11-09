@@ -187,6 +187,15 @@ def _default_lora_type(args) -> str:
 def validate_lora_args_after_megatron(args):
     """Checks that need Megatron's resolved args or the resolved eval-snapshot setting: Bridge LoRA's HF-export
     layout, and the targets native (raw-mode) LoRA's spec serves."""
+    if is_lora_enabled(args) and args.lora_checkpoint_format == "torch_dist":
+        assert args.megatron_to_hf_mode == "bridge", (
+            "--lora-checkpoint-format torch_dist needs --megatron-to-hf-mode bridge: native adapters keep out of "
+            "Megatron's sharded state, so its checkpoint would hold the frozen model without them"
+        )
+        assert not args.multi_lora, "--lora-checkpoint-format torch_dist saves one adapter, not slots"
+        assert (
+            args.ckpt_format == "torch_dist"
+        ), "--lora-checkpoint-format torch_dist saves in Megatron's --ckpt-format, so it needs --ckpt-format torch_dist"
     # save() writes a LoRA model to its adapter dir, never into the in-memory checkpoint a heal or rollback restores
     if is_lora_enabled(args) and not args.multi_lora and not args.debug_rollout_only:
         assert not args.indep_dp and args.non_persistent_ckpt_type != "local", (
