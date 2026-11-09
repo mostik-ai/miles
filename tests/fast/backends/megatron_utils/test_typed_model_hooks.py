@@ -165,6 +165,7 @@ class TestTypedModelHooks:
         worker.model[0].lora_attached = False
         worker.optimizer = worker.opt_param_scheduler = worker.snapshot_publisher = worker.adapter_slots = None
         worker._schedule_first_rollout = 0
+        worker._save_context = {}
         saved = []
         monkeypatch.setattr(model_module, "save_checkpoint", lambda *args, **kwargs: saved.append(args[0]))
         monkeypatch.setattr(actor_module.dist, "get_rank", lambda: rank)
