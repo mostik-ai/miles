@@ -23,6 +23,7 @@ from miles.utils.lora.arguments import (
     validate_lora_args,
     validate_lora_args_after_megatron,
 )
+from miles.utils.lora.utils import lora_rollout_enabled
 
 
 class TestLoraTargetOrdering:
@@ -152,6 +153,7 @@ def _single_lora_args(**overrides):
         debug_rollout_only=False,
         debug_skip_weight_update=False,
         hf_checkpoint="/hf",
+        lora_merged_rollout=False,
     )
     return Namespace(**(args | overrides))
 
@@ -300,6 +302,7 @@ def _bridge_args_without_layout(monkeypatch, *, multi_lora=False, **overrides):
         lora_alpha=16.0,
         lora_adapter_path=None,
         lora_checkpoint_format="adapter",
+        lora_merged_rollout=False,
         lora_type="lora",
         experts_shared_outer_loras=False,
         lora_adapter_convert_save=None,
@@ -426,3 +429,24 @@ def test_a_packed_expert_shared_outer_adapter_refuses_hf_exports_at_launch(monke
         lora_arguments._assert_adapter_layout_defined(_gpt_oss_export_args(monkeypatch))
     lora_arguments._assert_adapter_layout_defined(_gpt_oss_export_args(monkeypatch, experts_shared_outer_loras=False))
     lora_arguments._assert_adapter_layout_defined(_gpt_oss_export_args(monkeypatch, save_hf=None))
+
+
+def test_a_merged_rollout_serves_no_adapter_so_engines_and_weight_sync_take_the_full_weight_path():
+    args = Namespace(lora_rank=8, lora_adapter_path=None, lora_train_only=False, lora_merged_rollout=False)
+    assert lora_rollout_enabled(args)
+    assert not lora_rollout_enabled(Namespace(**(vars(args) | {"lora_merged_rollout": True})))
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"megatron_to_hf_mode": "raw"}, "Bridge's export"),
+        ({"lora_train_only": True}, "frozen base"),
+        ({"colocate": True}, "colocated trainer"),
+        ({"use_session_server": True}, "session server"),
+    ],
+)
+def test_a_merged_rollout_refuses_modes_that_would_serve_something_else(overrides, message):
+    args = _single_lora_args(lora_merged_rollout=True, lora_train_only=False, colocate=False, use_session_server=False)
+    with pytest.raises(AssertionError, match=message):
+        validate_lora_args(Namespace(**(vars(args) | overrides)))

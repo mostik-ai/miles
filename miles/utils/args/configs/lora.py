@@ -110,6 +110,16 @@ class LoraConfig(BaseConfig):
             )
         ),
     ] = False
+    lora_merged_rollout: A[
+        bool,
+        Arg(
+            help=(
+                "Serve rollouts from the base weights with the trained adapter merged in: each weight update sends "
+                "the merged weights in full, as a full fine-tune does, so SGLang decodes without LoRA kernels and "
+                "can run a speculative drafter. Bridge LoRA only, and not with --colocate."
+            )
+        ),
+    ] = False
     experts_shared_outer_loras: A[
         bool,
         Arg(
