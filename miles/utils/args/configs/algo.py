@@ -287,6 +287,13 @@ class AlgoRolloutOnlyConfig(BaseConfig):
         bool,
         Arg(help="Divide each group's advantages by the square root of its success rate, instead of its std."),
     ] = False
+    grpo_sqrt_length_reference: A[
+        int | None,
+        Arg(
+            help="Scale each answer's advantage by the root of its length over this many tokens, so a token weighs "
+            "1 / sqrt(length * reference) instead of 1 / length."
+        ),
+    ] = None
     rewards_normalization: A[
         bool,
         Arg(
