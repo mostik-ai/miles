@@ -45,6 +45,7 @@ def _scheduled_args() -> Namespace:
         allow_partial_train_step=False,
         multi_lora=False,
         enable_sample_ownership_checker=False,
+        skip_zero_advantage_samples=False,
     )
 
 
