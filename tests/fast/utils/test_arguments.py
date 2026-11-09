@@ -53,6 +53,8 @@ from miles.utils.arguments import (
     supports_partial_target_weight_update,
     validate_async_off_policy_correction,
     validate_group_first_stage_samples,
+    validate_group_reward_weighting,
+    validate_grpo_sqrt_success_normalization,
     validate_log_probs_backend_args,
     validate_miles_ext_kernels_args,
     validate_skip_actor_forward_only,
@@ -4580,3 +4582,37 @@ class TestValidateSkipZeroAdvantageSamples:
     def test_a_mode_without_the_rollout_side_schedule_is_refused(self, overrides):
         with pytest.raises(AssertionError, match="--skip-zero-advantage-samples is incompatible"):
             validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args(**overrides))
+
+
+class TestValidateGroupRewardWeighting:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(advantage_estimator="grpo", rewards_normalization=True, custom_reward_post_process_path=None)
+        return SimpleNamespace(**(defaults | overrides))
+
+    @pytest.mark.parametrize("estimator", ["grpo", "gspo"])
+    def test_a_group_normalized_run_passes(self, estimator):
+        validate_group_reward_weighting(self._args(advantage_estimator=estimator), "--option")
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"advantage_estimator": "reinforce_plus_plus_baseline"},
+            {"rewards_normalization": False},
+            {"custom_reward_post_process_path": "pkg.post_process"},
+        ],
+    )
+    def test_a_run_that_would_ignore_the_option_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--option"):
+            validate_group_reward_weighting(self._args(**overrides), "--option")
+
+
+def test_the_root_of_the_success_rate_refuses_a_length_penalty_which_lowers_the_mean_reward():
+    args = SimpleNamespace(
+        advantage_estimator="grpo",
+        rewards_normalization=True,
+        custom_reward_post_process_path=None,
+        length_penalty_coeff=0.5,
+    )
+    with pytest.raises(AssertionError, match="--length-penalty-coeff"):
+        validate_grpo_sqrt_success_normalization(args)
