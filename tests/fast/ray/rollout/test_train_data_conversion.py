@@ -495,6 +495,41 @@ class TestPostProcessRewards:
 
         assert abs(np.std(processed, ddof=1) - 1.0) < 1e-4
 
+    @pytest.mark.parametrize(
+        ("rewards", "right", "wrong"),
+        [
+            ([1.0, 0.0, 0.0, 0.0], 0.75 / 0.25**0.5, -(0.25**0.5)),
+            ([1.0, 1.0, 1.0, 0.0], 0.25 / 0.75**0.5, -(0.75**0.5)),
+        ],
+    )
+    def test_grpo_sqrt_success_normalization_divides_by_the_root_of_the_success_rate(self, rewards, right, wrong):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=True,
+            grpo_sqrt_success_normalization=True,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=rewards)
+
+        _, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
+        assert processed == pytest.approx([right if reward else wrong for reward in rewards], abs=1e-4)
+
+    def test_grpo_sqrt_success_normalization_refuses_a_negative_reward(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_sqrt_success_normalization=True,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[-1.0, -1.0, -1.0, 1.0])
+
+        with pytest.raises(AssertionError, match="never negative"):
+            _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
     def test_gspo_uses_grpo_normalization_path(self):
         args = make_args(
             advantage_estimator="gspo",
