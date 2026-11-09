@@ -540,6 +540,17 @@ class RolloutRelatedRolloutOnlyConfig(BaseConfig):
             )
         ),
     ] = None
+    group_first_stage_samples: A[
+        int | None,
+        Arg(
+            help=(
+                "In fully async training, generate only this many samples of a group first, abandon the group "
+                "when none of them earned a reward, and generate the rest otherwise. None generates the whole "
+                "group at once. The later stage counts against --async-max-concurrent-samples without waiting "
+                "for room, so the samples in flight can briefly exceed it."
+            )
+        ),
+    ] = None
     async_submit_within_staleness: A[
         bool,
         Arg(
