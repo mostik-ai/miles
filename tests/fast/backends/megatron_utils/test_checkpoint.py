@@ -159,3 +159,23 @@ class TestRawMbridgeCompanionIsolation:
             assert companion.weight_version.item() == 7
             assert companion.sample_consumptions.tolist() == [[1, 2, 3, 4, 0]]
             torch.testing.assert_close(model.weight, torch.full_like(model.weight, 5))
+
+
+def test_native_lora_adapters_are_hidden_from_the_hf_load_and_put_back() -> None:
+    """mbridge maps every parameter to an HF weight; the base checkpoint has none for an adapter."""
+    from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter
+
+    class Adapter(NativeLoRAAdapter):
+        def __init__(self) -> None:
+            torch.nn.Module.__init__(self)
+            self.gate_A = torch.nn.Parameter(torch.zeros(2, 2))
+
+    chunk = torch.nn.Module()
+    chunk.mlp = torch.nn.Module()
+    chunk.mlp.linear_fc1 = torch.nn.Linear(2, 2, bias=False)
+    chunk.mlp.lora_fc1_adapter = Adapter()
+
+    with checkpoint._hide_native_lora_adapters_from_hf_load([chunk]):
+        assert [name for name, _ in chunk.named_parameters()] == ["mlp.linear_fc1.weight"]
+
+    assert [name for name, _ in chunk.named_parameters()] == ["mlp.linear_fc1.weight", "mlp.lora_fc1_adapter.gate_A"]
