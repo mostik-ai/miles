@@ -54,6 +54,7 @@ from miles.utils.arguments import (
     validate_async_off_policy_correction,
     validate_group_first_stage_samples,
     validate_group_reward_weighting,
+    validate_grpo_sqrt_length_reference,
     validate_grpo_sqrt_success_normalization,
     validate_log_probs_backend_args,
     validate_miles_ext_kernels_args,
@@ -4617,3 +4618,22 @@ def test_the_root_of_the_success_rate_refuses_a_length_penalty_which_lowers_the_
     with pytest.raises(AssertionError, match="--length-penalty-coeff"):
         validate_grpo_sqrt_success_normalization(args)
 
+
+class TestValidateGrpoSqrtLengthReference:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            custom_reward_post_process_path=None,
+            calculate_per_token_loss=False,
+        )
+        return SimpleNamespace(**(defaults | overrides))
+
+    def test_a_group_normalized_per_answer_mean_passes(self):
+        validate_grpo_sqrt_length_reference(self._args())
+
+    @pytest.mark.parametrize("overrides", [{"rewards_normalization": False}, {"calculate_per_token_loss": True}])
+    def test_where_the_scale_would_not_mean_one_over_root_length_it_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--grpo-sqrt-length-reference"):
+            validate_grpo_sqrt_length_reference(self._args(**overrides))
