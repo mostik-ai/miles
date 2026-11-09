@@ -959,7 +959,7 @@ def save(
     if should_disable_forward_pre_hook(args):
         disable_forward_pre_hook(model)
 
-    if is_lora_model(model):
+    if is_lora_model(model) and args.lora_checkpoint_format == "adapter":
         assert adapter_slots is not None, "a LoRA --save needs the model's adapter slots"
         assert schedule_first_rollout is not None, "a LoRA --save records the rollout its schedule counts from"
         save_single_lora(model, optimizer, opt_param_scheduler, adapter_slots, args, iteration, schedule_first_rollout)
