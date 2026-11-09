@@ -162,6 +162,10 @@ def _resolve_rollout_functions(args) -> None:
                 "continuously and each step drains --rollout-batch-size of them. "
                 "Use --async-max-concurrent-samples to control how many samples are in flight."
             )
+        if args.group_first_stage_samples is not None:
+            validate_group_first_stage_samples(args)
+    else:
+        assert args.group_first_stage_samples is None, "--group-first-stage-samples needs --fully-async"
 
     user_eval_path = args.eval_function_path
     resolve_rollout_function_paths(args)
@@ -176,6 +180,15 @@ def _resolve_rollout_functions(args) -> None:
         args.eval_num_gpus > 0 and _compute_rollout_external(args)
     ), "eval_num_gpus cannot be set with external rollout engines."
     args.eval_uses_snapshots = args.eval_num_gpus > 0 or checkpoint_backend
+
+
+def validate_group_first_stage_samples(args) -> None:
+    option = "--group-first-stage-samples"
+    assert 1 <= args.group_first_stage_samples < args.n_samples_per_prompt, f"{option} must leave a later stage"
+    assert not args.group_rm, f"{option} reads each reward as its sample finishes"
+    assert (
+        args.async_unused_samples_handler == "drop"
+    ), f"{option} needs the drop handler: the retry handler would regenerate an abandoned prompt at once"
 
 
 def _add_miles_ext_kernels_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -413,6 +426,7 @@ def parse_args_and_get_parser(
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     _check_stop_token_replace_streaming_session(args, sglang=sglang)
+    _check_group_first_stage_seeds(args, sglang=sglang)
     _check_multimodal_token_space_processing_args(args, sglang=sglang)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
@@ -1032,6 +1046,11 @@ def _check_stop_token_replace_streaming_session(args: argparse.Namespace, *, sgl
             "Change the agent harness so a stop at a role token is followed by the message that token opens and "
             "pass --no-allow-stop-token-replace, or drop --sglang-enable-streaming-session."
         )
+
+
+def _check_group_first_stage_seeds(args: argparse.Namespace, *, sglang: SglangConfig) -> None:
+    if args.group_first_stage_samples is not None and sglang.common_value("enable_deterministic_inference"):
+        raise ValueError("--group-first-stage-samples: a later stage would repeat the first stage's seeds")
 
 
 def _apply_custom_config(args, data: dict) -> None:

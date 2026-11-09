@@ -182,6 +182,7 @@ class DefaultDataBuffer(DataBuffer):
 
         self._metric_gatherer = MetricGatherer()
         self._metric_aborted_groups = 0
+        self._metric_aborted_group_tokens = 0
         self._metric_stale_groups = 0
         self._metric_consumed_staleness: list[int] = []
         self._metric_selected_newest_lag: list[int] = []
@@ -206,6 +207,7 @@ class DefaultDataBuffer(DataBuffer):
         output = apply_aborted_filter(self._args, input.group)
         if not output.keep:
             self._metric_aborted_groups += 1
+            self._metric_aborted_group_tokens += sum(sample.response_length for sample in iter_samples(input.group))
             # Before the handler: a retry resets the prompt group, plans included.
             record_dropped_samples([input.prompt_group, input.group])
             self._unused_handler_fn(input.prompt_group, UnusedReason.ABORTED)
@@ -336,6 +338,7 @@ class DefaultDataBuffer(DataBuffer):
         metrics = {
             f"{prefix}queue_size": len(self._buffer),
             f"{prefix}aborted_groups_filtered": self._metric_aborted_groups,
+            f"{prefix}aborted_group_tokens": self._metric_aborted_group_tokens,
             f"{prefix}stale_groups_filtered": self._metric_stale_groups,
             **self._metric_gatherer.collect(),
         }
@@ -373,7 +376,7 @@ class DefaultDataBuffer(DataBuffer):
         self._metric_selected_versioned_tokens = 0
         self._metric_selected_samples = 0
         self._metric_selected_versioned_samples = 0
-        self._metric_aborted_groups = self._metric_stale_groups = 0
+        self._metric_aborted_groups = self._metric_stale_groups = self._metric_aborted_group_tokens = 0
         self._metric_fill_when_taken = None
         return metrics
 
