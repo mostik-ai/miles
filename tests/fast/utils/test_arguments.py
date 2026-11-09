@@ -32,6 +32,7 @@ from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
 from miles.utils.arguments import (
     CAKE_BACKEND_ARGS,
     FULLY_ASYNC_ROLLOUT_PATH,
+    _check_group_first_stage_seeds,
     _check_multimodal_token_space_processing_args,
     _check_stop_token_replace_streaming_session,
     _compute_custom_inference_engine_provider_path,
@@ -51,6 +52,7 @@ from miles.utils.arguments import (
     resolve_rollout_function_paths,
     supports_partial_target_weight_update,
     validate_async_off_policy_correction,
+    validate_group_first_stage_samples,
     validate_log_probs_backend_args,
     validate_miles_ext_kernels_args,
     validate_skip_actor_forward_only,
@@ -843,6 +845,7 @@ def _fully_async_candidate_args(**overrides) -> SimpleNamespace:
         over_sampling_batch_size=None,
         train_backend="megatron",
         ft_components=[],
+        group_first_stage_samples=None,
     )
     return SimpleNamespace(**(defaults | overrides))
 
@@ -886,6 +889,51 @@ def test_the_flag_still_rejects_a_different_rollout_function():
         _resolve_rollout_functions(args)
 
 
+def test_group_first_stage_samples_needs_the_fully_async_loop():
+    with pytest.raises(AssertionError, match="--group-first-stage-samples needs --fully-async"):
+        _resolve_rollout_functions(_fully_async_candidate_args(group_first_stage_samples=4))
+
+
+class TestValidateGroupFirstStageSamples:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(
+            group_first_stage_samples=4,
+            n_samples_per_prompt=8,
+            group_rm=False,
+            async_unused_samples_handler="drop",
+        )
+        return SimpleNamespace(**(defaults | overrides))
+
+    def test_a_first_stage_that_leaves_a_later_one_passes(self):
+        validate_group_first_stage_samples(self._args())
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"group_first_stage_samples": 8},
+            {"group_first_stage_samples": 0},
+            {"group_rm": True},
+            {"async_unused_samples_handler": "retry"},
+        ],
+    )
+    def test_refuses_arguments_that_break_the_stages(self, overrides):
+        with pytest.raises(AssertionError, match="--group-first-stage-samples"):
+            validate_group_first_stage_samples(self._args(**overrides))
+
+    def test_deterministic_inference_from_a_server_group_would_repeat_the_first_stage_seeds(self):
+        group = ServerGroupConfig(
+            worker_type=WorkerType.REGULAR,
+            num_gpus_per_engine=1,
+            overrides={"enable_deterministic_inference": True},
+            needs_offload=False,
+        )
+        model = ModelConfig(name="default", model_path=None, server_groups=[group], update_weights=True)
+        sglang = SglangConfig(models=[model], base_args={"enable_deterministic_inference": False})
+        with pytest.raises(ValueError, match="repeat the first stage's seeds"):
+            _check_group_first_stage_seeds(argparse.Namespace(group_first_stage_samples=4), sglang=sglang)
+
+
 def test_an_ordinary_rollout_function_path_stays_untouched():
     args = _fully_async_candidate_args(rollout_function_path="pkg.CustomRolloutFn")
 
@@ -925,6 +973,7 @@ def _make_fully_async_args(**overrides) -> SimpleNamespace:
         over_sampling_batch_size=None,
         train_backend="megatron",
         ft_components=[],
+        group_first_stage_samples=None,
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
