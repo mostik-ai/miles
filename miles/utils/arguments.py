@@ -1981,6 +1981,9 @@ def miles_validate_args(args):
     if args.grpo_sqrt_success_normalization:
         validate_grpo_sqrt_success_normalization(args)
 
+    if args.grpo_sqrt_length_reference is not None:
+        validate_grpo_sqrt_length_reference(args)
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -2045,6 +2048,13 @@ def validate_grpo_sqrt_success_normalization(args) -> None:
     assert (
         args.length_penalty_coeff == 0
     ), f"{option} reads the success rate as the mean reward; drop --length-penalty-coeff"
+
+
+def validate_grpo_sqrt_length_reference(args) -> None:
+    """The scale leaves a token 1 / sqrt(length) only when the loss averages each answer over its own tokens."""
+    option = "--grpo-sqrt-length-reference"
+    validate_group_reward_weighting(args, option)
+    assert not args.calculate_per_token_loss, f"{option} needs a per-answer mean loss, not --calculate-per-token-loss"
 
 
 def validate_skip_actor_forward_only(args) -> None:

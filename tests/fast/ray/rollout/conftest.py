@@ -70,6 +70,7 @@ def make_args(**overrides: Any) -> Namespace:
         rewards_normalization=True,
         grpo_std_normalization=False,
         grpo_sqrt_success_normalization=False,
+        grpo_sqrt_length_reference=None,
         length_penalty_coeff=0.0,
         length_penalty_min_tokens=1,
         reward_key=None,
