@@ -36,6 +36,7 @@ def test_bridge_provider_receives_backend_runtime_options_and_preserves_unset_ov
     )
     same_name_fields = set(vars(args.backend)) - {
         "dsa_kernel_backend",
+        "cp_comm_type",
         "decoder_first_pipeline_num_layers",
         "decoder_last_pipeline_num_layers",
         "moe_router_bias_update_rate",

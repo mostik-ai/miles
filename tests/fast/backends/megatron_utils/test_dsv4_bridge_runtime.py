@@ -13,6 +13,7 @@ def _runtime_args(**overrides):
         "expert_tensor_parallel_size": 1,
         "sequence_parallel": False,
         "context_parallel_size": 1,
+        "cp_comm_type": ["p2p"],
         "calculate_per_token_loss": False,
         "variable_seq_lengths": True,
         "attention_softmax_in_fp32": True,
@@ -52,6 +53,17 @@ def _provider():
         mtp_num_layers=1,
         experimental_attention_variant="dsv4_hybrid",
     )
+
+
+@pytest.mark.parametrize(
+    ("cp_comm_type", "expected"), [(["a2a"], "a2a"), (["a2a", "p2p"], ["a2a", "p2p"])], ids=["one", "per-layer"]
+)
+def test_bridge_runtime_carries_the_context_parallel_communication_type(cp_comm_type, expected):
+    provider = _provider()
+
+    _apply_bridge_runtime_config(provider, _runtime_args(context_parallel_size=4, cp_comm_type=cp_comm_type))
+
+    assert (provider.context_parallel_size, provider.cp_comm_type) == (4, expected)
 
 
 def test_bridge_runtime_preserves_native_variant_and_disables_unrequested_mtp():
