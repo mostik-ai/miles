@@ -181,6 +181,13 @@ class TrainConfig(BaseConfig):
         ),
     ] = "torch"
     log_probs_chunk_size: A[int, Arg(help="Chunk size to compute log probs to save memory")] = -1
+    reorder_ulysses_chunks_on_host: A[
+        bool,
+        Arg(
+            help="Build Transformer Engine's Ulysses chunk-reorder indices from host integers, once per "
+            "micro-batch, instead of from GPU scalars in every attention call."
+        ),
+    ] = False
     indep_dp: A[
         bool,
         Arg(
