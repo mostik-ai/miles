@@ -358,7 +358,9 @@ class _FullyAsyncRolloutState:
 
 
 def _copy_and_reset_for_retry(prompt_group: list[Sample]) -> list[Sample]:
-    copied = copy.deepcopy(prompt_group)
+    # Shallow: reset_for_retry rebinds the fields holding the answers, so a deep copy would duplicate a group's
+    # finished answers only to drop them; the copies share what it keeps, which the await-free save pickles at once.
+    copied = [copy.copy(sample) for sample in prompt_group]
     for sample in copied:
         sample.reset_for_retry()
     return copied

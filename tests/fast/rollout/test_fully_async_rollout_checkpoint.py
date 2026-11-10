@@ -139,13 +139,15 @@ async def _generate_and_reward(_state, group: list[Sample], **_kwargs: Any) -> l
 
 
 async def test_running_generation_is_restored_as_a_clean_retry(monkeypatch, tmp_path: Path) -> None:
-    """A half-written generation is replayed from an untouched prompt after restore."""
+    """A half-written generation is replayed from an untouched prompt after restore, and the save leaves it running."""
     fn = make_fn(monkeypatch, _checkpoint_args(tmp_path), FakeDataSource())
     group = make_group(3)
     group[0].response = "partial"
+    group[0].tokens = [1, 2, 3]
     fn._running_tasks.append(_RunningTask(prompt_group=group, task=asyncio.Future()))
 
     fn.save(tmp_path)
+    assert (group[0].response, group[0].tokens) == ("partial", [1, 2, 3])
     restored = make_fn(monkeypatch, _checkpoint_args(tmp_path), FakeDataSource())
     restored.load(tmp_path)
 
