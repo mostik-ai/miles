@@ -19,6 +19,10 @@ from megatron.training.checkpointing import save_checkpoint
 from megatron.training.global_vars import get_args
 
 from miles.backends.megatron_utils.megatron_config import has_hf_checkpoint
+from miles.backends.training_utils.checkpoint.tracker import (
+    lora_adapter_checkpoint_dir,
+    write_checkpoint_tracker_iteration,
+)
 from miles.backends.training_utils.model_companion import (
     ModelCompanionInstallationUtils,
     ModelCompanionSampleConsumptionUtils,
@@ -182,7 +186,7 @@ def save_checkpoint_with_lora(
         assert (
             publisher is not None or args.megatron_to_hf_mode == "raw"
         ), "Bridge LoRA checkpoint requires a snapshot publisher"
-        save_dir = Path(args.save) / f"iter_{iteration:07d}" / "adapter"
+        save_dir = lora_adapter_checkpoint_dir(args.save, iteration)
         logger.info(f"Saving LoRA checkpoint to {save_dir}")
         save_lora_checkpoint(
             model,
@@ -193,6 +197,9 @@ def save_checkpoint_with_lora(
             opt_param_scheduler=opt_param_scheduler,
             iteration=iteration,
         )
+        # Megatron names its newest save in this tracker; a LoRA save does the same, so a restarted run finds it.
+        if not dist.is_initialized() or dist.get_rank() == 0:
+            write_checkpoint_tracker_iteration(args.save, iteration)
     else:
         save_checkpoint(iteration, model, optimizer, opt_param_scheduler)
 

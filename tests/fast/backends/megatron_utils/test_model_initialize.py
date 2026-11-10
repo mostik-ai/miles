@@ -233,6 +233,9 @@ def _load_model_state_with(
     write_tracker: bool = True,
     ckpt_step: int | None = None,
     exit_on_missing_checkpoint: bool = False,
+    saved_lora_iteration: int | None = None,
+    no_save_optim: bool = False,
+    restore_calls: list[dict] | None = None,
 ) -> "LoadCheckpointOutput":
     from miles.backends.megatron_utils.model import load_model_state
 
@@ -242,6 +245,14 @@ def _load_model_state_with(
         restored_trained_iteration = not finetune or iteration > 0
     if write_tracker:
         (load_dir / "latest_checkpointed_iteration.txt").write_text(str(iteration))
+    if saved_lora_iteration is not None:
+        (load_dir / "latest_checkpointed_iteration.txt").write_text(str(saved_lora_iteration))
+        (load_dir / f"iter_{saved_lora_iteration:07d}" / "adapter").mkdir(parents=True)
+
+    def restore(*_args, **kwargs) -> int | None:
+        if restore_calls is not None:
+            restore_calls.append(kwargs)
+        return adapter_iteration
 
     with ExitStack() as stack:
         stack.enter_context(
@@ -250,19 +261,20 @@ def _load_model_state_with(
                 return_value=(iteration, restored_trained_iteration),
             )
         )
-        stack.enter_context(
-            patch("miles.backends.megatron_utils.model.restore_lora_adapter", return_value=adapter_iteration)
-        )
+        stack.enter_context(patch("miles.backends.megatron_utils.model.restore_lora_adapter", side_effect=restore))
         _patch_initialize_side_effects(stack)
         return load_model_state(
             Namespace(
                 use_checkpoint_opt_param_scheduler=True,
                 global_batch_size=8,
                 finetune=finetune,
-                lora_rank=0 if lora_adapter_path is None else 8,
+                lora_rank=0 if lora_adapter_path is None and saved_lora_iteration is None else 8,
                 megatron_to_hf_mode="core",
                 lora_adapter_path=lora_adapter_path,
+                no_load_optim=finetune,
+                no_save_optim=no_save_optim,
                 load=str(load_dir),
+                requested_load=str(load_dir),
                 ckpt_step=ckpt_step,
                 exit_on_missing_checkpoint=exit_on_missing_checkpoint,
             ),
@@ -312,8 +324,8 @@ class TestWhereALoadSaysTheRunStarts:
 
 
 class TestALoraAdapterThatCarriesItsOwnIteration:
-    """LoRA saves write no tracker, so a LoRA resume loads the base under --finetune (iteration 0, nothing
-    trained) and the adapter checkpoint alone says whether, and where, training stopped."""
+    """A LoRA resume loads the base under --finetune (iteration 0, nothing trained) and the adapter checkpoint
+    alone says whether, and where, training stopped."""
 
     def _start(self, tmp_path: Path, adapter_iteration: int | None) -> "LoadCheckpointOutput":
         return _load_model_state_with(
@@ -336,3 +348,38 @@ class TestALoraAdapterThatCarriesItsOwnIteration:
     def test_adapter_weights_without_training_state_start_at_rollout_zero(self, tmp_path: Path) -> None:
         """An HF adapter or shards saved without training state carry no iteration to continue from."""
         assert self._start(tmp_path, adapter_iteration=None).start_rollout_id == 0
+
+
+class TestARunRestartedOnItsOwnLoraSave:
+    """The tracker under --load names the run's newest LoRA save; a restarted run continues from that save."""
+
+    def _restart(self, tmp_path: Path, **overrides: object) -> tuple["LoadCheckpointOutput", list[dict]]:
+        restore_calls: list[dict] = []
+        output = _load_model_state_with(
+            tmp_path=tmp_path,
+            finetune=True,
+            iteration=0,
+            write_tracker=False,
+            saved_lora_iteration=4,
+            adapter_iteration=4,
+            restore_calls=restore_calls,
+            **overrides,
+        )
+        return output, restore_calls
+
+    def test_it_continues_after_the_saved_iteration_with_the_saved_optimizer(self, tmp_path: Path) -> None:
+        output, (restore,) = self._restart(tmp_path)
+
+        assert (output.loaded_rollout_id, output.start_rollout_id) == (4, 5)
+        assert restore["adapter_dir"] == tmp_path / "ckpt" / "iter_0000004" / "adapter"
+        assert restore["load_optimizer"] is True
+
+    def test_its_own_save_wins_over_the_adapter_the_run_started_from(self, tmp_path: Path) -> None:
+        _output, (restore,) = self._restart(tmp_path, lora_adapter_path=str(tmp_path / "initial-adapter"))
+
+        assert restore["adapter_dir"] == tmp_path / "ckpt" / "iter_0000004" / "adapter"
+
+    def test_a_run_that_saves_no_optimizer_restarts_with_a_fresh_one(self, tmp_path: Path) -> None:
+        _output, (restore,) = self._restart(tmp_path, no_save_optim=True)
+
+        assert restore["load_optimizer"] is False

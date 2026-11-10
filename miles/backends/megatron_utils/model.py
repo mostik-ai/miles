@@ -29,6 +29,7 @@ from miles.backends.megatron_utils.ft.indep_dp import allreduce_grads_and_losses
 from miles.backends.megatron_utils.local_weight_checksum import dump_local_weight_checksums
 from miles.backends.megatron_utils.lora.native import wrap_model_provider_with_lora
 from miles.backends.megatron_utils.optimizer_state_reset import reset_optimizer_states
+from miles.backends.training_utils.checkpoint.tracker import tracked_lora_adapter_dir
 from miles.backends.training_utils.data.rollout import DataIterator, get_batch
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
 from miles.backends.training_utils.loss.objective import loss_function
@@ -991,6 +992,23 @@ class LoadCheckpointOutput:
     start_rollout_id: int
 
 
+@dataclasses.dataclass(frozen=True)
+class _LoraAdapterToRestore:
+    adapter_dir: Path
+    load_optimizer: bool
+
+
+def _lora_adapter_to_restore(args: Namespace) -> _LoraAdapterToRestore | None:
+    """The run's own newest LoRA save when --load holds one, so a restarted run continues it; else the adapter
+    --lora-adapter-path names."""
+    continued = tracked_lora_adapter_dir(args.requested_load)
+    if continued is not None:
+        return _LoraAdapterToRestore(continued, load_optimizer=not getattr(args, "no_save_optim", False))
+    if args.lora_adapter_path is not None:
+        return _LoraAdapterToRestore(Path(args.lora_adapter_path), load_optimizer=not args.no_load_optim)
+    return None
+
+
 def load_model_state(
     args: Namespace,
     *,
@@ -1029,9 +1047,15 @@ def load_model_state(
         iteration = 0
         restored_trained_iteration = not args.finetune
 
-    if is_lora_enabled(args) and role == "actor" and args.lora_adapter_path is not None:
+    adapter = _lora_adapter_to_restore(args) if is_lora_enabled(args) and role == "actor" else None
+    if adapter is not None:
         adapter_iteration = restore_lora_adapter(
-            model, args, optimizer=optimizer, opt_param_scheduler=opt_param_scheduler
+            model,
+            args,
+            adapter_dir=adapter.adapter_dir,
+            load_optimizer=adapter.load_optimizer,
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
         )
         if adapter_iteration is not None:
             iteration = adapter_iteration

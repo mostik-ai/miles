@@ -251,23 +251,25 @@ def restore_lora_adapter(
     model: Sequence[torch.nn.Module],
     args: Namespace,
     *,
+    adapter_dir: Path,
+    load_optimizer: bool,
     optimizer: Any | None,
     opt_param_scheduler: Any | None,
 ) -> int | None:
-    """Restore ``--lora-adapter-path`` into the attached adapters; return the saved iteration, if any.
+    """Restore the adapter checkpoint in ``adapter_dir`` into the attached adapters; return the saved iteration, if any.
 
     The directory's format decides what can be restored: per-rank native shards carry the
-    optimizer and scheduler state, an HF/PEFT adapter carries weights only. Restoring the
-    optimizer is required unless ``--no-load-optim``; a checkpoint that cannot provide it fails.
+    optimizer and scheduler state, an HF/PEFT adapter carries weights only. With ``load_optimizer``
+    the optimizer must be restored; a checkpoint that cannot provide it fails.
     """
-    adapter_dir = Path(args.lora_adapter_path).resolve()
+    adapter_dir = adapter_dir.resolve()
     shard = _native_adapter_shard(adapter_dir)
     if shard is not None:
         _load_native_adapter_shard(model, shard)
         training_state = _load_training_state(adapter_dir)
     else:
         assert (adapter_dir / "adapter_model.safetensors").exists(), (
-            f"--lora-adapter-path {adapter_dir} holds neither per-rank native shards "
+            f"adapter checkpoint {adapter_dir} holds neither per-rank native shards "
             "(adapter_megatron_rank*.pt) nor an HF adapter (adapter_model.safetensors)"
         )
         assert args.megatron_to_hf_mode == "raw", "loading an HF/PEFT adapter requires --megatron-to-hf-mode raw"
@@ -276,7 +278,7 @@ def restore_lora_adapter(
 
     if optimizer is None:
         return None
-    if args.no_load_optim:
+    if not load_optimizer:
         # the fp32 masters were built before the adapter load; without this the first step() reverts it
         optimizer.reload_model_params()
     else:
