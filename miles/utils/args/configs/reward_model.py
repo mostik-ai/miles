@@ -40,6 +40,15 @@ class RewardModelRolloutOnlyConfig(BaseConfig):
         str | None,
         Arg(help="URL for the reward model service for --rm-type remote_rm, e.g. http://localhost:8000"),
     ] = None
+    rm_timeout: A[
+        float | None,
+        Arg(
+            help=(
+                "Seconds one --rm-type remote_rm call may take in all, with no separate connect or read limit; "
+                "0 sets no limit. Unset keeps aiohttp's default timeout."
+            ),
+        ),
+    ] = None
     custom_reward_post_process_path: A[
         CustomFunctionConfig | None,
         Arg(

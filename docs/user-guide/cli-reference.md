@@ -283,6 +283,7 @@ Sections mirror the launch-script argument groups.
 |---|---|---|---|
 | `--rm-type` | str | – | Built-in reward: `math`, `dapo`, `deepscaler`, `gemma_math`, `f1`, `gpqa`, `ifbench`, `remote_rm`, `random`, `deterministic_random`. A `boxed_` prefix (e.g. `boxed_math`) extracts `\boxed{}` from the response before grading. |
 | `--rm-url` | str | – | Endpoint when `--rm-type remote_rm`. |
+| `--rm-timeout` | float | – | Seconds one `remote_rm` call may take in all, with no separate connect limit; `0` sets no limit. Unset keeps aiohttp's default. |
 | `--group-rm` | flag | off | Batched reward computation. |
 | `--custom-rm-path` | str | – | Custom reward function (see [Customization](/user-guide/customization)). |
 | `--dynamic-sampling-filter-path` | str | – | Group filter (DAPO-style). |
