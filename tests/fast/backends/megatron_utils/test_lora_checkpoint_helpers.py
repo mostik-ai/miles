@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from miles.backends.megatron_utils.checkpoint import _is_megatron_checkpoint, save_checkpoint_with_lora
+from miles.backends.training_utils.checkpoint.tracker import read_checkpoint_tracker_iteration
 
 # ---------------------------------------------------------------------------
 # _is_megatron_checkpoint
@@ -83,6 +84,24 @@ class TestSaveCheckpointWithLoRA:
         call_args = mock_save_lora.call_args
         assert call_args.kwargs["publisher"] is publisher
         assert "adapter" in call_args[1].get("save_dir", call_args[0][2] if len(call_args[0]) > 2 else "")
+
+    @patch("miles.backends.megatron_utils.checkpoint.get_args")
+    @patch("miles.backends.megatron_utils.checkpoint.save_lora_checkpoint")
+    @patch("miles.backends.megatron_utils.checkpoint.is_lora_model", return_value=True)
+    def test_a_lora_save_names_itself_the_newest_checkpoint(
+        self, mock_is_lora, mock_save_lora, mock_get_args, tmp_path
+    ):
+        """A restarted run reads the tracker to find the save it continues from."""
+        mock_get_args.return_value = Namespace(save=str(tmp_path))
+        trackers_seen_by_the_adapter_save = []
+        mock_save_lora.side_effect = lambda *_args, **_kwargs: trackers_seen_by_the_adapter_save.append(
+            read_checkpoint_tracker_iteration(tmp_path)
+        )
+
+        save_checkpoint_with_lora(42, [MagicMock()], MagicMock(), MagicMock(), publisher=MagicMock())
+
+        assert trackers_seen_by_the_adapter_save == [None]
+        assert read_checkpoint_tracker_iteration(tmp_path) == 42
 
     @patch("miles.backends.megatron_utils.checkpoint.get_args")
     @patch("miles.backends.megatron_utils.checkpoint.save_checkpoint")

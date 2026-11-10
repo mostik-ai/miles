@@ -17,7 +17,10 @@ from miles.backends.megatron_utils.lora.utils import is_lora_enabled, lora_rollo
 from miles.backends.megatron_utils.megatron_to_hf import converter_model_name
 from miles.backends.megatron_utils.rematerialize_utils import build_main_cast_context
 from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_hf_weight_iterator
-from miles.backends.training_utils.checkpoint.tracker import read_checkpoint_tracker_iteration
+from miles.backends.training_utils.checkpoint.tracker import (
+    read_checkpoint_tracker_iteration,
+    tracked_lora_adapter_dir,
+)
 from miles.backends.training_utils.data.rollout import (
     DataIterator,
     get_data_iterator,
@@ -370,6 +373,10 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self._finalize_pending_async_save()
 
+        assert tracked_lora_adapter_dir(requested_load) is None, (
+            f"a hot restart cannot roll back to the LoRA save under --load {requested_load!r}: only a restarted "
+            "run restores one"
+        )
         resume_from_ckpt = read_checkpoint_tracker_iteration(requested_load) is not None
         if not resume_from_ckpt and not (self.args.ckpt_step is not None and self.args.load == requested_load):
             assert self.args.megatron_to_hf_mode != "bridge", "bridge mode unsupported"

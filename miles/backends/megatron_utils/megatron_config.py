@@ -10,6 +10,7 @@ from typing import Any, Literal
 import pydantic
 import yaml
 
+from miles.backends.training_utils.checkpoint.tracker import tracked_lora_adapter_dir
 from miles.utils.file_arg_utils import resolve_file_arg
 from miles.utils.pydantic_utils import FrozenStrictBaseModel
 from miles.utils.workers.argv_utils import coerce_dict_to_args, declared_arg_dests
@@ -388,7 +389,8 @@ def resolve_args_checkpoint_load(args: Namespace) -> None:
             raise ValueError("an explicit checkpoint selection requires --load")
         return
 
-    if has_megatron_checkpoint(args.load):
+    # A LoRA save holds adapters only: the base loads as on a fresh run, and load_model_state restores the adapters.
+    if has_megatron_checkpoint(args.load) and tracked_lora_adapter_dir(args.load) is None:
         return
 
     # TODO: During loading, we need to set the start_rollout_id here.

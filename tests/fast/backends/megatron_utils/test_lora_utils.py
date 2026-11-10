@@ -217,12 +217,8 @@ class TestDistributedOptimizerParameterState:
 
 
 class TestRestoreLoraAdapter:
-    """--lora-adapter-path restores exactly what its format carries; anything the run asks for and
+    """An adapter checkpoint restores exactly what its format carries; anything the run asks for and
     the checkpoint cannot give fails instead of silently training a fresh adapter or optimizer."""
-
-    @staticmethod
-    def _args(tmp_path, *, no_load_optim, mode="raw"):
-        return Namespace(lora_adapter_path=str(tmp_path), no_load_optim=no_load_optim, megatron_to_hf_mode=mode)
 
     @staticmethod
     def _optimizer(calls):
@@ -241,10 +237,12 @@ class TestRestoreLoraAdapter:
             state = {"iteration": 5, "optimizer": {"step": 7}, "opt_param_scheduler": {"lr": 0.5}} | training_state
             torch.save(state, tmp_path / "training_state_rank0.pt")
 
-    def _restore(self, tmp_path, calls, *, no_load_optim, scheduler=None, mode="raw"):
+    def _restore(self, tmp_path, calls, *, load_optimizer, scheduler=None, mode="raw"):
         return lora_utils.restore_lora_adapter(
             [_AdapterModel()],
-            self._args(tmp_path, no_load_optim=no_load_optim, mode=mode),
+            Namespace(megatron_to_hf_mode=mode),
+            adapter_dir=tmp_path,
+            load_optimizer=load_optimizer,
             optimizer=self._optimizer(calls),
             opt_param_scheduler=scheduler,
         )
@@ -259,7 +257,12 @@ class TestRestoreLoraAdapter:
         restored = [_AdapterModel(), _AdapterModel()]
 
         lora_utils.restore_lora_adapter(
-            restored, self._args(tmp_path, no_load_optim=True), optimizer=None, opt_param_scheduler=None
+            restored,
+            Namespace(megatron_to_hf_mode="raw"),
+            adapter_dir=tmp_path,
+            load_optimizer=False,
+            optimizer=None,
+            opt_param_scheduler=None,
         )
 
         assert [chunk.adapter.lora_A.flatten().tolist() for chunk in restored] == [[1.0, 1.0], [2.0, 2.0]]
@@ -276,21 +279,23 @@ class TestRestoreLoraAdapter:
         scheduler_loads = []
 
         iteration = self._restore(
-            tmp_path, calls, no_load_optim=False, scheduler=SimpleNamespace(load_state_dict=scheduler_loads.append)
+            tmp_path, calls, load_optimizer=True, scheduler=SimpleNamespace(load_state_dict=scheduler_loads.append)
         )
 
         assert iteration == 5
         assert [name for name, _ in calls] == ["load_state_dict", "parameter_state"]
         assert scheduler_loads == [{"lr": 0.5}]
 
-    def test_no_load_optim_refreshes_the_masters_and_keeps_the_step_and_schedule(self, tmp_path, monkeypatch):
+    def test_without_the_optimizer_the_masters_are_refreshed_and_the_step_and_schedule_kept(
+        self, tmp_path, monkeypatch
+    ):
         _single_rank(monkeypatch)
         calls = []
         self._write_native(tmp_path, parameter_state=[])
         scheduler_loads = []
 
         iteration = self._restore(
-            tmp_path, calls, no_load_optim=True, scheduler=SimpleNamespace(load_state_dict=scheduler_loads.append)
+            tmp_path, calls, load_optimizer=False, scheduler=SimpleNamespace(load_state_dict=scheduler_loads.append)
         )
 
         assert iteration == 5
@@ -306,14 +311,14 @@ class TestRestoreLoraAdapter:
         ],
         ids=["no-training-state", "saved-with-no-save-optim", "pre-parameter-state-format"],
     )
-    def test_an_unrestorable_optimizer_fails_unless_no_load_optim(
+    def test_an_unrestorable_optimizer_fails_when_the_run_asks_for_it(
         self, tmp_path, monkeypatch, training_state, message
     ):
         _single_rank(monkeypatch)
         self._write_native(tmp_path, **training_state)
 
         with pytest.raises(AssertionError, match=message):
-            self._restore(tmp_path, [], no_load_optim=False)
+            self._restore(tmp_path, [], load_optimizer=True)
 
     def test_an_hf_adapter_loads_weights_only(self, tmp_path, monkeypatch):
         (tmp_path / "adapter_model.safetensors").write_bytes(b"")
@@ -322,24 +327,24 @@ class TestRestoreLoraAdapter:
         _single_rank(monkeypatch)
         calls = []
 
-        assert self._restore(tmp_path, calls, no_load_optim=True) is None
+        assert self._restore(tmp_path, calls, load_optimizer=False) is None
         assert loads == [str(tmp_path.resolve())]
         assert calls == [("reload_model_params", None)]
         with pytest.raises(AssertionError, match="no optimizer state"):
-            self._restore(tmp_path, [], no_load_optim=False)
+            self._restore(tmp_path, [], load_optimizer=True)
 
     def test_an_hf_adapter_requires_raw_mode(self, tmp_path, monkeypatch):
         (tmp_path / "adapter_model.safetensors").write_bytes(b"")
         _single_rank(monkeypatch)
 
         with pytest.raises(AssertionError, match="requires --megatron-to-hf-mode raw"):
-            self._restore(tmp_path, [], no_load_optim=True, mode="bridge")
+            self._restore(tmp_path, [], load_optimizer=False, mode="bridge")
 
     def test_a_directory_without_an_adapter_fails(self, tmp_path, monkeypatch):
         _single_rank(monkeypatch)
 
         with pytest.raises(AssertionError, match="holds neither"):
-            self._restore(tmp_path, [], no_load_optim=True)
+            self._restore(tmp_path, [], load_optimizer=False)
 
     def test_a_shard_that_does_not_match_the_adapter_fails(self, tmp_path, monkeypatch):
         """A silently partial load resumes training on a half-initialized adapter."""
@@ -349,7 +354,7 @@ class TestRestoreLoraAdapter:
         )
 
         with pytest.raises(RuntimeError, match=r"missing=\['adapter.lora_B'\], unexpected=\['stale_lora_C'\]"):
-            self._restore(tmp_path, [], no_load_optim=True)
+            self._restore(tmp_path, [], load_optimizer=False)
 
     def test_shards_saved_under_another_layout_fail(self, tmp_path, monkeypatch):
         """Falling through to fresh adapter weights would hide a resharding mistake."""
@@ -357,4 +362,4 @@ class TestRestoreLoraAdapter:
         torch.save({"adapter.lora_A": torch.ones(1, 2)}, tmp_path / "adapter_megatron_rank1.pt")
 
         with pytest.raises(AssertionError, match="none for global rank 0"):
-            self._restore(tmp_path, [], no_load_optim=True)
+            self._restore(tmp_path, [], load_optimizer=False)
