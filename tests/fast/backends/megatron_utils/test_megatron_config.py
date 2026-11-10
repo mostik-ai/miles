@@ -462,6 +462,17 @@ class TestResolveArgsCheckpointLoad:
         assert args.requested_load == load
         assert (args.no_load_optim, args.no_load_rng, args.finetune) == (True, True, True)
 
+    @pytest.mark.parametrize("mode", ["core", "bridge"])
+    def test_a_run_restarted_on_its_own_lora_save_starts_where_its_trainer_restored(self, tmp_path, mode):
+        """A start_rollout_id of 0 would send the run back to rollout 0 with the restored adapters."""
+        load = _write_megatron_checkpoint(tmp_path)
+        (tmp_path / "save" / "iter_0000010" / "adapter").mkdir(parents=True)
+        args = _make_checkpoint_args(tmp_path, load=load, megatron_to_hf_mode=mode)
+
+        resolve_args_checkpoint_load(args)
+
+        assert args.start_rollout_id is None
+
     @pytest.mark.parametrize(
         "selector",
         [{"ckpt_step": 0}, {"ckpt_step": 7}, {"exit_on_missing_checkpoint": True}],
