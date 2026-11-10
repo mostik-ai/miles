@@ -242,6 +242,7 @@ class TestDispose:
         executor.data_source = object()
         executor.args = Namespace()
         executor._metric_checker = None
+        executor._delete_store_refs = None
         monkeypatch.setattr(rollout_executor_module.event_analyzer, "run_analysis_from_args", lambda _args: None)
         monkeypatch.setattr(
             rollout_executor_module.event_analyzer, "run_sample_ownership_analysis", lambda *, args: None
