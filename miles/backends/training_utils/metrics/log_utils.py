@@ -1,5 +1,6 @@
 import logging
 from argparse import Namespace
+from collections.abc import Callable
 from math import isclose
 from pathlib import Path
 
@@ -12,7 +13,6 @@ from miles.backends.training_utils.data.context_parallel import get_sum_of_sampl
 from miles.backends.training_utils.data.rollout import DataIterator
 from miles.backends.training_utils.metrics import perf
 from miles.backends.training_utils.parallel import get_parallel_state
-from miles.utils.flops_utils import fwd_tflops_per_gpu
 from miles.utils.ft_utils.process_group_utils import MultiPGUtil
 from miles.utils.metric_utils import compute_rollout_step, namespace_metrics, strip_metrics_namespace
 from miles.utils.tracking_utils import tracking
@@ -155,7 +155,9 @@ def aggregate_forward_results(
             values += batch_result[key]
 
         # Handle dynamic batch size: restore original order
-        if args.use_dynamic_batch_size and hasattr(data_iterator, "micro_batch_indices"):
+        if args.use_dynamic_batch_size and hasattr(
+            data_iterator, "micro_batch_indices"
+        ):  # config-access-exempt: only dynamic-batch iterators expose micro-batch indices
             origin_values = [None] * len(values)
             origin_indices = sum(data_iterator.micro_batch_indices, [])
             for value, origin_index in zip(values, origin_indices, strict=False):
@@ -194,6 +196,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
             if key in [
                 "tokens",
                 "multimodal_train_inputs",
+                "mrope_position_ids",
                 "loss_masks",
                 "sample_indices",
                 "rollout_ids",
@@ -234,6 +237,8 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                         "teacher_log_probs",
                         "opd_reverse_kl",
                         "entropy",
+                        "topk_logprob_abs_diff",
+                        "topk_set_mismatch",
                     ]:
                         sum_of_sample_mean = get_sum_of_sample_mean(
                             total_lengths,
@@ -281,8 +286,6 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 if args.use_rollout_routing_replay:
                     # lop diff w/ w/o r3 is very big
                     abs_tol = 5e-3
-                elif getattr(args, "sglang_config", None) is not None:
-                    abs_tol = 1e-8
                 else:
                     abs_tol = 1e-8
                 assert isclose(
@@ -301,6 +304,17 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 f"({log_dict['log_probs']}) != rollout_log_probs "
                 f"({log_dict['rollout_log_probs']})"
             )
+            # Emitted by the torch-native forward-only pass; a backend that skips it must fail here, not pass.
+            if args.rollout_top_logprobs_num > 0:
+                for key in ("topk_logprob_abs_diff", "topk_set_mismatch"):
+                    assert key in log_dict, (
+                        f"CI check failed: --rollout-top-logprobs-num is set, but the actor did not score the "
+                        f"rollout top-k candidates ({key} missing)"
+                    )
+                    assert log_dict[key][0] == 0, (
+                        f"CI check failed: true_on_policy_mode is enabled, but the rollout top-k candidates "
+                        f"differ from the trainer's: {key} sum = {log_dict[key][0]}"
+                    )
 
     if args.log_multi_turn:
         log_multi_turn_data(rollout_id, args, rollout_data)
@@ -411,12 +425,19 @@ def log_multi_turn_data(rollout_id: int, args: Namespace, rollout_data: RolloutB
         )
 
 
-def log_perf_data(rollout_id: int, args: Namespace, extra_metrics: dict | None = None) -> None:
+def log_perf_data(
+    rollout_id: int,
+    args: Namespace,
+    compute_total_fwd_flops: Callable[[list[int]], float] | None,
+    compute_total_train_flops: Callable[[list[int]], float] | None = None,
+    extra_metrics: dict | None = None,
+) -> None:
     perf.log_perf_data_raw(
         rollout_id=rollout_id,
         args=args,
         is_primary_rank=_is_perf_primary_rank(),
-        compute_total_fwd_flops=lambda seq_lens: fwd_tflops_per_gpu(seq_lens, args, dist.get_world_size()),
+        compute_total_fwd_flops=compute_total_fwd_flops,
+        compute_total_train_flops=compute_total_train_flops,
         extra_metrics=extra_metrics,
     )
 
@@ -562,6 +583,7 @@ def log_train_step(
         for key, val in extra_metrics.items():
             log_dict_out[f"train/{role_tag}{key}"] = val
 
+    log_dict_out["rollout/step"] = compute_rollout_step(args, rollout_id)
     log_dict_out, step_key = namespace_metrics(
         log_dict_out,
         trainer_model_id=args.trainer_model_id,
