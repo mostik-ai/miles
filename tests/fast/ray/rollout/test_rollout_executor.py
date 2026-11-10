@@ -346,7 +346,7 @@ class _FakeObjectStore:
 
 def _make_executor(tmp_path: Path, rollout_fn: _CountingRolloutFn) -> RolloutExecutor:
     executor = RolloutExecutor.__new__(RolloutExecutor)
-    executor.args = make_args(load=str(tmp_path), save=str(tmp_path))
+    executor.args = make_args(load=str(tmp_path), requested_load=str(tmp_path), save=str(tmp_path))
     executor.use_legacy_rollout_v1 = True
     executor.generate_rollout = rollout_fn
     executor.eval_generate_rollout = rollout_fn
@@ -648,6 +648,16 @@ class TestOneDirectoryPerRolloutCheckpoint:
 
         with pytest.raises(AssertionError, match="cannot resume that state"):
             await executor.load(5)
+
+    async def test_the_state_loads_from_the_runs_own_load_directory(self, tmp_path: Path) -> None:
+        """A trainer that restored a LoRA save reads its base weights from another directory, which args.load names."""
+        executor = _make_executor(tmp_path, _CountingRolloutFn())
+        await executor.save(5)
+        executor.args.load = str(tmp_path / "base-weights")
+
+        await executor.load(5)
+
+        assert executor.data_source.loaded == [compute_rollout_checkpoint_dir(tmp_path, rollout_id=5) / "data_source"]
 
     async def test_a_step_that_was_never_trained_is_refused(self, tmp_path: Path) -> None:
         """A run whose trainer starts from scratch has no rollout state, and must not be asked for any."""
