@@ -1,6 +1,6 @@
-import copy
 import enum
 import logging
+import pickle
 from argparse import Namespace
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -29,14 +29,12 @@ class _RolloutExecutorOutputSnapshotter:
             "a replayed batch must not be captured again"
         )
 
-        self._snapshots[key] = copy.deepcopy(
-            _OutputSnapshotEntry(data=data, metadata=metadata, phase=_OutputSnapshotPhase.CAPTURED)
-        )
+        self._snapshots[key] = _OutputSnapshotEntry.of(data, metadata, _OutputSnapshotPhase.CAPTURED)
         captured = [one for one, entry in self._snapshots.items() if entry.phase is _OutputSnapshotPhase.CAPTURED]
         for stale in captured[: max(len(captured) - _MAX_RETAINED_OUTPUTS, 0)]:
             del self._snapshots[stale]
 
-    def get(self, *, trainer_model_id: str | None, rollout_id: int) -> "_OutputSnapshotEntry | None":
+    def get(self, *, trainer_model_id: str | None, rollout_id: int) -> "_OutputSnapshot | None":
         if self._args.ci_inject_missing_prefetched_batch_bug:
             assert self._args.ci_test
             logger.info(
@@ -57,7 +55,7 @@ class _RolloutExecutorOutputSnapshotter:
         ), f"rollout {rollout_id} of trainer model {trainer_model_id} was already replayed"
 
         self._snapshots[key] = replace(entry, phase=_OutputSnapshotPhase.REPLAYED)
-        return copy.deepcopy(entry)
+        return entry.unpickled()
 
     def discard_completed(self, *, completed_rollout_ids: dict[str | None, int]) -> None:
         self._snapshots = {
@@ -70,7 +68,7 @@ class _RolloutExecutorOutputSnapshotter:
     def save(self, directory: Path) -> None:
         save_simple_checkpoint(
             directory=directory,
-            data={key: (entry.data, entry.metadata) for key, entry in self._snapshots.items()},
+            data={key: tuple(entry.unpickled()) for key, entry in self._snapshots.items()},
         )
 
     def load(self, directory: Path) -> None:
@@ -92,7 +90,7 @@ class _RolloutExecutorOutputSnapshotter:
 
         self._snapshots.update(
             {
-                key: _OutputSnapshotEntry(data=data, metadata=metadata, phase=_OutputSnapshotPhase.LOADED)
+                key: _OutputSnapshotEntry.of(data, metadata, _OutputSnapshotPhase.LOADED)
                 for key, (data, metadata) in outputs.items()
             }
         )
@@ -101,7 +99,7 @@ class _RolloutExecutorOutputSnapshotter:
     def drop_loaded(self, *, reason: str) -> None:
         """Drop the restored untrained batches, e.g. because the data source they came from was reset."""
         for key in [key for key, entry in self._snapshots.items() if entry.phase is _OutputSnapshotPhase.LOADED]:
-            data = self._snapshots.pop(key).data
+            data = self._snapshots.pop(key).unpickled().data
             logger.warning(
                 f"Dropping untrained rollout batch {key} ({reason}); its {len(data)} samples are not trained"
             )
@@ -120,8 +118,22 @@ class _OutputSnapshotPhase(enum.Enum):
     REPLAYED = "replayed"
 
 
-@dataclass(frozen=True)
-class _OutputSnapshotEntry:
+class _OutputSnapshot(NamedTuple):
     data: list[Sample]
     metadata: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _OutputSnapshotEntry:
+    """A batch pickled when it is captured, so later mutation of its samples cannot reach it. Pickling a 512-answer
+    long-context batch takes about a second; copy.deepcopy took half a minute, on every step's critical path."""
+
+    payload: bytes
     phase: _OutputSnapshotPhase
+
+    @staticmethod
+    def of(data: list[Sample], metadata: dict[str, Any], phase: _OutputSnapshotPhase) -> "_OutputSnapshotEntry":
+        return _OutputSnapshotEntry(pickle.dumps((data, metadata), protocol=pickle.HIGHEST_PROTOCOL), phase)
+
+    def unpickled(self) -> _OutputSnapshot:
+        return _OutputSnapshot(*pickle.loads(self.payload))
