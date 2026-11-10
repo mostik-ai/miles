@@ -168,6 +168,7 @@ class TestTypedModelHooks:
         saved = []
         monkeypatch.setattr(model_module, "save_checkpoint", lambda *args, **kwargs: saved.append(args[0]))
         monkeypatch.setattr(actor_module.dist, "get_rank", lambda: rank)
+        monkeypatch.setattr(actor_module, "log_checkpoint_save", lambda *args, **kwargs: None)
         seen = []
 
         def callback(

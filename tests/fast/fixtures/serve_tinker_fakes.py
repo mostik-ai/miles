@@ -105,6 +105,8 @@ async def tinker_startup(monkeypatch: pytest.MonkeyPatch, tmp_path) -> AsyncIter
     monkeypatch.setattr(
         http_utils.httpx, "AsyncClient", partial(httpx.AsyncClient, transport=httpx.MockTransport(respond))
     )
+    # The rollout client names its own transport, so the fake router stands in for that transport too.
+    monkeypatch.setattr(http_utils, "_AiohttpTransport", lambda *, max_connections: httpx.MockTransport(respond))
     try:
         yield SimpleNamespace(
             args=args,
