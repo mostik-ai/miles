@@ -88,6 +88,8 @@ class LinearTrajectory:
     messages: list[dict[str, Any]] = field(default_factory=list)
     records: list[SessionRecord] = field(default_factory=list)
     trajectory_token_ids: list[list[int]] = field(default_factory=list)
+    # per checkpoint, the [start, end) runs of its token_ids that this session generated
+    trajectory_answers: list[tuple[tuple[int, int], ...]] = field(default_factory=list)
     generated_checkpoint_message_ends: list[int] = field(default_factory=list)
     num_assistant: int = 0
     turn_args_history: list[dict[str, Any]] = field(default_factory=list)
@@ -102,6 +104,7 @@ class LinearTrajectory:
             messages=list(self.messages),
             records=list(self.records),
             trajectory_token_ids=list(self.trajectory_token_ids),
+            trajectory_answers=list(self.trajectory_answers),
             generated_checkpoint_message_ends=list(self.generated_checkpoint_message_ends),
             turn_args_history=list(self.turn_args_history),
         )
@@ -159,8 +162,21 @@ class LinearTrajectory:
             tito_tokenizer=tito_tokenizer,
             message_matcher=matcher,
         )
+        if config.franky_generated_spans:
+            prepared.body["franky_generated_spans"] = [
+                list(answer) for answer in self._answers_in(checkpoint_index, prepared.body["input_ids"])
+            ]
         self._rollback_to_checkpoint(checkpoint_index)
         return prepared
+
+    def _answers_in(self, checkpoint_index: int, token_ids: list[int]) -> tuple[tuple[int, int], ...]:
+        """The checkpoint's generated runs that *token_ids* still holds unchanged."""
+        if checkpoint_index < 0:
+            return ()
+        return _clip_answers(
+            self.trajectory_answers[checkpoint_index],
+            _common_prefix_len(self.trajectory_token_ids[checkpoint_index], token_ids),
+        )
 
     def _render_token_ids(
         self,
@@ -248,6 +264,8 @@ class LinearTrajectory:
         # prefix rewrite stored history, so the next canonical replay could
         # no longer match its own session.
         self.messages = self.messages + request_messages[len(self.messages) :] + [assistant_message]
+        answer = ((len(prompt_token_ids), len(all_token_ids)),) if completion_token_ids else ()
+        self.trajectory_answers.append(self._answers_in(len(self.trajectory_answers) - 1, prompt_token_ids) + answer)
         self.trajectory_token_ids.append(all_token_ids)
         self.turn_args_history.append(turn_args or {})
         self.generated_checkpoint_message_ends.append(len(request_messages) + 1)
@@ -369,10 +387,21 @@ class LinearTrajectory:
 
         self.messages = self.messages[:rollback_msg_end]
         self.trajectory_token_ids = self.trajectory_token_ids[: checkpoint_index + 1]
+        self.trajectory_answers = self.trajectory_answers[: checkpoint_index + 1]
         self.turn_args_history = self.turn_args_history[: checkpoint_index + 1]
         self.records = self.records[: checkpoint_index + 1]
         self.generated_checkpoint_message_ends = self.generated_checkpoint_message_ends[: checkpoint_index + 1]
         self.num_assistant = len(self.generated_checkpoint_message_ends)
+
+
+def _common_prefix_len(a: list[int], b: list[int]) -> int:
+    length = min(len(a), len(b))
+    return next((index for index in range(length) if a[index] != b[index]), length)
+
+
+def _clip_answers(answers: tuple[tuple[int, int], ...], end: int) -> tuple[tuple[int, int], ...]:
+    """The parts of *answers* before position *end*."""
+    return tuple((start, min(stop, end)) for start, stop in answers if start < min(stop, end))
 
 
 class SessionRegistry:

@@ -94,3 +94,33 @@ def test_valid_retry_renders_selected_checkpoint_before_rollback():
 
     assert prepared.body["input_ids"] == [1, 2, 5]
     assert _snapshot(session) == checkpoint
+
+
+def test_each_turn_names_the_earlier_answers_it_still_holds_for_franky_engines():
+    """A Franky engine computes an earlier answer again with the taps its decode read, so it must know where it is."""
+    registry = _make_registry()
+    session = registry.get_session(registry.create_session())
+    config = make_session_server_config(franky_generated_spans=True)
+    _commit(session, [USER], [1, 2], [3, 4])
+    _commit(session, [USER, ASSISTANT, TOOL], [1, 2, 3, 4, 5], [6, 7, 8])
+    registry.tito_tokenizer.merge_tokens = MagicMock(return_value=[1, 2, 3, 4, 5, 6, 7, 9])
+    turn = [USER, ASSISTANT, TOOL, ASSISTANT, {**TOOL, "content": "next"}]
+
+    prepared = session.prepare_token_ids_and_request_args(
+        {"messages": turn}, config=config, tito_tokenizer=registry.tito_tokenizer
+    )
+
+    assert prepared.body["franky_generated_spans"] == [[2, 4], [5, 7]]
+
+
+def test_a_turn_without_franky_engines_sends_no_answers():
+    registry = _make_registry()
+    session = registry.get_session(registry.create_session())
+    _commit(session, [USER], [1, 2], [3, 4])
+    registry.tito_tokenizer.merge_tokens = MagicMock(return_value=[1, 2, 3, 4, 5])
+
+    prepared = session.prepare_token_ids_and_request_args(
+        {"messages": [USER, ASSISTANT, TOOL]}, config=make_session_server_config(), tito_tokenizer=registry.tito_tokenizer
+    )
+
+    assert "franky_generated_spans" not in prepared.body
