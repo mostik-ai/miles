@@ -1823,8 +1823,9 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 help=(
                     "Leave samples whose advantage is exactly zero out of training. They add exactly zero gradient, "
                     "so the update stays the same, up to rounding, while the trainer computes less: the loss still "
-                    "divides by the whole batch, and an all-zero batch still steps the optimizer on the shortest "
-                    "samples. Training metrics, tokens/s, TFLOPs and MFU then cover only the samples computed."
+                    "divides by the whole batch, or by its tokens under --calculate-per-token-loss, and an all-zero "
+                    "batch still steps the optimizer on the shortest samples. Training metrics, tokens/s, TFLOPs and "
+                    "MFU then cover only the samples computed."
                 ),
             )
             parser.add_argument(
@@ -4269,7 +4270,6 @@ def validate_skip_zero_advantage_samples(args) -> None:
             ("--entropy-coef", args.entropy_coef != 0),
             ("--use-kl-loss", args.use_kl_loss),
             ("--normalize-advantages", args.normalize_advantages),
-            ("--calculate-per-token-loss", args.calculate_per_token_loss),
             ("--custom-pg-loss-reducer-function-path", args.custom_pg_loss_reducer_function_path is not None),
             ("--custom-tis-function-path", args.custom_tis_function_path is not None),
             ("--rollout-data-postprocess-path", args.rollout_data_postprocess_path is not None),

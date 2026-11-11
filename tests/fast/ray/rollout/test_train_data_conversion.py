@@ -1144,10 +1144,16 @@ def test_delayed_dp_split_preserves_the_tinker_loss_vectors():
 
 
 def _split_skipping_zero_advantage(
-    rewards: list[float], lengths: list[int], *, dp_size: int = 2, max_tokens_per_gpu: int = 100
+    rewards: list[float],
+    lengths: list[int],
+    *,
+    dp_size: int = 2,
+    max_tokens_per_gpu: int = 100,
+    calculate_per_token_loss: bool = False,
 ) -> list[dict]:
     args = make_args(
         skip_zero_advantage_samples=True,
+        calculate_per_token_loss=calculate_per_token_loss,
         global_batch_size=len(rewards),
         use_dynamic_batch_size=True,
         max_tokens_per_gpu=max_tokens_per_gpu,
@@ -1172,6 +1178,16 @@ class TestSkipZeroAdvantageSamples:
         assert _trained(shards) == [0, 2]
         assert all(shard["num_rollouts"] == [4] for shard in shards)
         assert all(shard["raw_reward"] == [1.0, 0.0, -1.0, 0.0] for shard in shards)
+
+    def test_a_per_token_loss_gets_the_share_of_the_batch_tokens_computed(self):
+        shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40], calculate_per_token_loss=True)
+
+        assert all(shard["computed_loss_token_share"] == (10 + 30) / (10 + 20 + 30 + 40) for shard in shards)
+
+    def test_a_per_sample_loss_gets_no_token_share(self):
+        shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40])
+
+        assert all("computed_loss_token_share" not in shard for shard in shards)
 
     def test_the_timer_counts_only_the_samples_computed(self):
         shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40])
