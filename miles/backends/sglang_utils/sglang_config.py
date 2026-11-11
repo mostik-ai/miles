@@ -162,6 +162,11 @@ class ServerGroupConfig(FrozenStrictBaseModel):
     def model_path(self) -> str:
         return self.overrides["model_path"]
 
+    @property
+    def serves_franky_sandy(self) -> bool:
+        """A Franky Sandy group prefills its own frozen model for the other groups of its model, which read its taps."""
+        return self.overrides.get("franky_side") == "sandy"
+
     @classmethod
     def resolve(
         cls,
@@ -237,10 +242,11 @@ class ModelConfig(FrozenStrictBaseModel):
         server_groups = [config for config, _ in resolved]
 
         if server_groups:
-            model_paths = {g.overrides["model_path"] for g in server_groups}
+            model_paths = {g.overrides["model_path"] for g in server_groups if not g.serves_franky_sandy}
             assert len(model_paths) == 1, (
                 f"Model '{raw.name}' has server groups with different model_path values: "
-                f"{model_paths}. All server groups within a model must use the same model_path."
+                f"{model_paths}. All server groups within a model must use the same model_path, "
+                f"except Franky Sandy groups, which serve their own frozen model."
             )
             effective_model_path = model_paths.pop()
         else:
