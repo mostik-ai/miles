@@ -161,3 +161,34 @@ def test_sgl_router_serves_the_ricky_model_and_takes_workers_over_its_api():
         *("--worker-api", "--request-timeout-secs", "600"),
         *("--franky-block-size", "256", "--policy", "cache_aware"),
     ]
+
+
+def test_sgl_router_serves_the_name_the_ricky_engines_are_served_under():
+    """Agents name the policy as they like through the session server; the Ricky engines serve one fixed name."""
+    groups = [
+        ServerGroupConfig(
+            worker_type=WorkerType.REGULAR,
+            num_gpus_per_engine=1,
+            needs_offload=False,
+            overrides={"model_path": "/models/ricky", "franky_side": "ricky", "served_model_name": "policy"},
+        ),
+        ServerGroupConfig(
+            worker_type=WorkerType.REGULAR,
+            num_gpus_per_engine=1,
+            needs_offload=False,
+            overrides={"model_path": "/models/sandy", "franky_side": "sandy"},
+        ),
+    ]
+    model_cfg = ModelConfig(name="default", model_path=None, server_groups=groups, update_weights=True)
+    args = Namespace(
+        router="sgl_router",
+        sgl_router_path="sgl-router",
+        sgl_router_args="",
+        sglang_router_request_timeout_secs=600,
+        rollout_external_router_pd=False,
+    )
+    ctx = SimpleNamespace(self_addrs={"primary": SimpleNamespace(host="127.0.0.1", port=30000)})
+
+    argv = make_router_backend(args).launch_argv(ctx, model_cfg=model_cfg, interpreter_prefix=["python"])
+
+    assert argv[5:9] == ["--model-id", "policy", "--tokenizer-path", "/models/ricky/tokenizer.json"]
