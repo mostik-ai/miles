@@ -358,6 +358,7 @@ class InferenceEngineSpec(BaseCommandSpec):
             engine_info_bootstrap_port=ctx.self_addrs["engine_info_bootstrap"].port,
             gated_launch_port=ctx.self_addrs[GATE_PORT_NAME].port,
             random_seed=random_seed,
+            franky_bootstrap_port=f.port if (f := ctx.self_addrs.get("franky_bootstrap")) else None,
         )
 
 
@@ -423,6 +424,11 @@ def _compute_spec_inference_engine(
             *(
                 [PortInfo(name="disaggregation_bootstrap", static_port=11000, allow_dynamic=True)]
                 if server_group_config.worker_type == WorkerType.PREFILL
+                else []
+            ),
+            *(
+                [PortInfo(name="franky_bootstrap", static_port=14000, allow_dynamic=True)]
+                if server_group_config.serves_franky_sandy
                 else []
             ),
             PortInfo(name="engine_info_bootstrap", static_port=12000, mode="master", allow_dynamic=True),
