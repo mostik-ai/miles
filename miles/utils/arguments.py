@@ -65,9 +65,8 @@ def resolve_rollout_function_paths(args) -> tuple[str, str]:
         standard_path = "miles.rollout.sglang_rollout.generate_rollout"
     else:
         standard_path = "miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
-    rollout_path = args.rollout_function_path or standard_path
-    if args.fully_async:
-        rollout_path = FULLY_ASYNC_ROLLOUT_PATH
+    default_path = FULLY_ASYNC_ROLLOUT_PATH if args.fully_async else standard_path
+    rollout_path = args.rollout_function_path or default_path
     # Resolved after the override: shared-engine eval must reach the producer it pauses.
     eval_path = args.eval_function_path or rollout_path
     return rollout_path, eval_path
@@ -79,6 +78,11 @@ def driver_owns_generation_pause(args) -> bool:
 
 def supports_partial_target_weight_update(args) -> bool:
     return not args.colocate and args.update_weight_transfer_mode == "p2p"
+
+
+def _extends_fully_async_rollout(rollout_function_path: str) -> bool:
+    rollout_function = load_function(rollout_function_path)
+    return isinstance(rollout_function, type) and issubclass(rollout_function, load_function(FULLY_ASYNC_ROLLOUT_PATH))
 
 
 def _resolve_rollout_functions(args) -> None:
@@ -99,9 +103,10 @@ def _resolve_rollout_functions(args) -> None:
         ), "--fully-async needs the class-based rollout API; unset MILES_USE_LEGACY_ROLLOUT_V1"
         # Runs after validate_multi_lora_args, which selects a rollout function of its own.
         assert not args.multi_lora, "--fully-async and multi-LoRA select different rollout functions"
-        assert (
-            args.rollout_function_path is None
-        ), "--fully-async and --rollout-function-path both select a rollout function; pass only one"
+        assert args.rollout_function_path is None or _extends_fully_async_rollout(args.rollout_function_path), (
+            "--fully-async runs FullyAsyncRolloutFn or a subclass of it, and --rollout-function-path names "
+            "another rollout function; pass only one"
+        )
         if args.colocate:
             assert args.train_backend != "fsdp", (
                 "--fully-async --colocate needs the megatron IPC weight updater; the FSDP updater still "
@@ -712,7 +717,8 @@ def get_miles_extra_args_provider(add_custom_arguments=None):
                 default=False,
                 help=(
                     "Run fully async rollout: a persistent worker keeps generating while the trainer "
-                    "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function; "
+                    "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function, or the "
+                    "subclass of it that --rollout-function-path names; "
                     "evaluation keeps the standard rollout function, which fully async does not serve. "
                     "Requires train_async.py."
                 ),
