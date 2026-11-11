@@ -7,7 +7,7 @@ import sys
 import tempfile
 from fnmatch import fnmatchcase
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -42,7 +42,7 @@ from miles.utils.arguments import (
 )
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
-from miles.utils.function_registry import function_registry
+from miles.utils.function_registry import function_registry, load_function
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
 from miles.utils.object_store_config import compute_mooncake_init_kwargs_vanilla
 from miles.utils.run_uuid import RUN_UUID_LENGTH, validate_run_uuid
@@ -772,10 +772,28 @@ def test_the_flag_and_a_matching_path_agree():
 
 def test_the_flag_still_rejects_a_different_rollout_function():
     """Two different selections remain a misconfiguration."""
-    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="pkg.CustomRolloutFn")
+    args = _fully_async_candidate_args(
+        fully_async=True,
+        rollout_function_path="miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn",
+    )
 
     with pytest.raises(AssertionError, match="pass only one"):
         _resolve_rollout_functions(args)
+
+
+def test_the_flag_runs_a_subclass_of_the_fully_async_class_for_rollout_and_eval(monkeypatch):
+    """A subclass is still the producer, so the driver schedules it as one and eval pauses the same instance."""
+    fully_async_class = load_function(FULLY_ASYNC_ROLLOUT_PATH)
+    plugin = ModuleType("fully_async_plugin")
+    plugin.CappedRolloutFn = type("CappedRolloutFn", (fully_async_class,), {})
+    monkeypatch.setitem(sys.modules, "fully_async_plugin", plugin)
+    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="fully_async_plugin.CappedRolloutFn")
+
+    _resolve_rollout_functions(args)
+
+    assert args.fully_async is True
+    assert args.rollout_function_path == "fully_async_plugin.CappedRolloutFn"
+    assert args.eval_function_path == "fully_async_plugin.CappedRolloutFn"
 
 
 def test_an_ordinary_rollout_function_path_stays_untouched():
