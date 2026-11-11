@@ -2,6 +2,8 @@
 
 import enum
 import logging
+import os
+import shlex
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import Sequence
@@ -28,6 +30,7 @@ logger = logging.getLogger(__name__)
 class RouterKind(str, enum.Enum):
     SGLANG = "sglang"
     MILES = "miles"
+    SGL_ROUTER = "sgl_router"
 
 
 @dataclass(frozen=True)
@@ -133,9 +136,34 @@ class MilesRouterBackend(RouterBackend):
         return False
 
 
+class SglRouterBackend(RouterBackend):
+    """SGLang's sgl-router binary, which serves Franky pairs: each request to a Ricky engine also goes to a Sandy
+    engine, which sends Ricky the prompt's taps. Miles registers the engines over its --worker-api."""
+
+    kind = RouterKind.SGL_ROUTER
+    features = RouterFeatures(pd_disaggregation=False, routing_key_header=None)
+
+    def _launch_argv(
+        self, ctx: LaunchCommandContext, *, model_cfg: "ModelConfig", interpreter_prefix: list[str]
+    ) -> list[str]:
+        primary = ctx.self_addrs["primary"]
+        # the router serves the model its Ricky engines are named by, which defaults to their model_path
+        [model_path] = {group.model_path for group in model_cfg.server_groups if not group.serves_franky_sandy}
+        return [
+            *(self.args.sgl_router_path, "--host", resolve_ip(primary.host), "--port", str(primary.port)),
+            *("--model-id", model_path, "--tokenizer-path", os.path.join(model_path, "tokenizer.json")),
+            *("--worker-api", "--request-timeout-secs", str(self.args.sglang_router_request_timeout_secs)),
+            *shlex.split(self.args.sgl_router_args),
+        ]
+
+    def _router_routes_by_key(self, model_cfg: "ModelConfig | None") -> bool:
+        return False
+
+
 _BACKEND_CLASSES: dict[RouterKind, type[RouterBackend]] = {
     RouterKind.SGLANG: SGLangRouterBackend,
     RouterKind.MILES: MilesRouterBackend,
+    RouterKind.SGL_ROUTER: SglRouterBackend,
 }
 
 
