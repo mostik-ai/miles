@@ -55,7 +55,8 @@ def _per_token_reducer(
 
 
 @pytest.fixture
-def cpu_rollout_store(monkeypatch: pytest.MonkeyPatch) -> None:
+def serve_cpu_rollout(monkeypatch: pytest.MonkeyPatch) -> Callable[[dict], None]:
+    """Returns a function that makes the object store serve the given rollout shard on CPU."""
     from copy import deepcopy
     from types import SimpleNamespace
 
@@ -63,13 +64,9 @@ def cpu_rollout_store(monkeypatch: pytest.MonkeyPatch) -> None:
     from miles.utils import object_store
     from miles.utils.object_store import ObjectStoreGetResult
 
-    value = {
-        "partition": [0],
-        "tokens": [list(range(11))],
-        "total_lengths": [11],
-        "response_lengths": [1],
-        "loss_masks": [[1]],
-    }
-    store = SimpleNamespace(get=lambda ref: ObjectStoreGetResult(deepcopy(value), release_fn=lambda value: None))
-    monkeypatch.setattr(object_store, "_INSTANCE", store)
+    def serve(value: dict) -> None:
+        store = SimpleNamespace(get=lambda ref: ObjectStoreGetResult(deepcopy(value), release_fn=lambda value: None))
+        monkeypatch.setattr(object_store, "_INSTANCE", store)
+
     monkeypatch.setattr(rollout.current_platform, "current_device", lambda: torch.device("cpu"))
+    return serve
