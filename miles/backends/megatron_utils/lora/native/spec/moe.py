@@ -27,7 +27,9 @@ class GroupedExpertsSpec:
     def attach(self, mlp: nn.Module, layer: nn.Module, context: AttachContext) -> int:
         from megatron.core import parallel_state
 
-        if not hasattr(mlp, "experts"):
+        if not hasattr(
+            mlp, "experts"
+        ):  # config-access-exempt: distinguish routed-expert MLP hosts from dense MLP hosts
             return 0
         config = mlp.config
         experts = mlp.experts
@@ -45,18 +47,22 @@ class GroupedExpertsSpec:
             experts.lora_fc1_adapter = LoRAGroupedFC1(
                 hf_prefix=fc1_prefix, reference=fc1.weight0, width=fc1.weight0.shape[1], **common
             )
-            attach_adapter_forward(fc1, experts.lora_fc1_adapter, context.lora.scale)
+            attach_adapter_forward(fc1, experts.lora_fc1_adapter)
             count += 1
         fc2_prefix = context.naming.block_prefix(layer, fc2.weight0, ["w2"])
         if context.lora.selects(f"{fc2_prefix}0.w2"):
             experts.lora_fc2_adapter = LoRAGroupedFC2(
                 hf_prefix=fc2_prefix, reference=fc2.weight0, width=fc2.weight0.shape[0], **common
             )
-            attach_adapter_forward(fc2, experts.lora_fc2_adapter, context.lora.scale)
+            attach_adapter_forward(fc2, experts.lora_fc2_adapter)
             count += 1
 
-        shared = getattr(mlp, "shared_experts", None)  # absent on MoEs without shared experts
-        if shared is not None and hasattr(shared, "experts"):
+        shared = getattr(
+            mlp, "shared_experts", None
+        )  # absent on MoEs without shared experts  # config-access-exempt: MoE implementations may omit shared experts
+        if shared is not None and hasattr(
+            shared, "experts"
+        ):  # config-access-exempt: shared experts may themselves use a grouped expert wrapper
             count += self._attach_shared(shared, layer, context)
         return count
 
@@ -76,8 +82,10 @@ class GroupedExpertsSpec:
 
         for index, sub in enumerate(subs):
             for host_attr, delta in (("linear_fc1", adapter.fc1_delta), ("linear_fc2", adapter.fc2_delta)):
-                host = getattr(sub, host_attr)
-                attach_delta_forward(host, functools.partial(_sub_expert_delta, delta, index), context.lora.scale)
+                host = getattr(
+                    sub, host_attr
+                )  # config-access-exempt: the expert architecture selects the host projection attribute
+                attach_delta_forward(host, functools.partial(_sub_expert_delta, delta, index), adapter.add_delta)
                 adapter.bind_host(host)
         return 1
 

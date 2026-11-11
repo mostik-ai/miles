@@ -36,7 +36,7 @@ class MegatronHfWeightIteratorBase(HfWeightIteratorBase):
         )
 
     def _hf_atomic_update_groups(self):
-        return get_hf_atomic_update_groups(self.model_name, q_lora_rank=self.args.q_lora_rank)
+        return get_hf_atomic_update_groups(self.model_name, q_lora_rank=self.args.backend.q_lora_rank)
 
     def _iter_hf_adapter_units(self, adapter, *, materialize):
         """Both megatron exporters are PP-local after gathering TP/EP; the PP
@@ -149,7 +149,13 @@ def _gather_pp_full_adapter(
     return sorted(merged.items())
 
 
+_FROZEN_TOWER_PROVIDERS = ("inkling_mm_model_provider", "qwen3_5_mm_model_provider")
+
+
 def _iter_mm_tower_units(args, *, materialize):
-    if "inkling_mm_model_provider" not in (args.custom_model_provider_path or ""):
+    # The trainer never owns these frozen towers, so they come from the boot checkpoint on every sync, like any
+    # weight an engine drops across offload.
+    provider = args.custom_model_provider_path
+    if provider is None or not any(name in provider.path for name in _FROZEN_TOWER_PROVIDERS):
         return
     yield from iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize)
