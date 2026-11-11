@@ -221,6 +221,9 @@ def loss_function(
         else:
             loss = loss / loss_normalizer * parallel_state.intra_dp.size
     else:
+        # with zero-advantage samples skipped, both divisors below count only the tokens computed, so the share
+        # restores the whole batch's token count
+        loss = loss * batch.get("computed_loss_token_share", 1.0)
         # Megatron's finalize_model_grads divides by the token count; other backends divide here
         if apply_megatron_loss_scaling:
             loss = loss * parallel_state.cp.size
