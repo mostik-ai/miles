@@ -256,6 +256,7 @@ Sections mirror the launch-script argument groups.
 | `--use-tis` | flag | off | Truncated Importance Sampling. |
 | `--use-routing-replay` | flag | off | Forward/backward routing consistency. |
 | `--use-rollout-routing-replay` | flag | off | R3 — capture inference-side expert routing and replay it during training. |
+| `--log-routing-replay-expert-load` | flag | off | With R3, log before each step the samples that send the most token copies to one expert-parallel rank. |
 | `--calculate-per-token-loss` | flag | off | Per-token loss reduction. |
 | `--no-check-for-nan-in-loss-and-grad` | flag | off | Skip NaN/Inf guard (Megatron flag, debug only). |
 | `--true-on-policy-mode` | flag | off | Strict on-policy: reject samples from a prior policy. |

@@ -245,6 +245,16 @@ class AlgoConfig(BaseConfig):
             )
         ),
     ] = False
+    log_routing_replay_expert_load: A[
+        bool,
+        Arg(
+            help=(
+                "Before each training step, log the samples whose replayed routing sends the most token "
+                "copies to one expert-parallel rank. The training actor counts them on the CPU, about 0.3 s "
+                "per 128K-token sample. Takes effect only with --use-rollout-routing-replay."
+            )
+        ),
+    ] = False
     use_indexer_replay: A[
         bool,
         Arg(help="Replay indexer topk decisions for layers with indexers."),
