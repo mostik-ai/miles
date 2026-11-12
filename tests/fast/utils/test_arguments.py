@@ -2316,6 +2316,39 @@ class TestSessionServerV2Validation:
         assert str(exc_info.value) == (f"--use-session-server v2 does not support {flag}; v2 returns list[Sample]")
 
 
+class TestSessionFrankyGeneratedSpansValidation:
+    def _parse(self, extra):
+        parser = get_megatron_arg_parser()
+        return parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+
+    @pytest.mark.parametrize(
+        ("session_server", "found"),
+        [([], "False"), (["--use-session-server", "v2"], "'v2'")],
+        ids=["no-session-server", "v2"],
+    )
+    def test_spans_are_refused_unless_the_v1_session_server_runs(self, session_server, found):
+        args = self._parse([*session_server, "--session-franky-generated-spans"])
+
+        with pytest.raises(ValueError) as exc_info:
+            miles_validate_args(args)
+
+        assert str(exc_info.value) == (
+            "--session-franky-generated-spans needs the v1 session server (--use-session-server or "
+            "--use-session-server v1), the only one that sends franky_generated_spans; this run has "
+            f"--use-session-server={found}"
+        )
+
+    @pytest.mark.parametrize(
+        "session_server", [["--use-session-server"], ["--use-session-server", "v1"]], ids=["bare", "v1"]
+    )
+    def test_spans_are_accepted_with_the_v1_session_server(self, session_server):
+        args = self._parse([*session_server, "--session-franky-generated-spans"])
+
+        miles_validate_args(args)
+
+        assert args.session_franky_generated_spans is True
+
+
 class TestSessionServerScalingArguments:
     def _parse(self, extra):
         parser = argparse.ArgumentParser()

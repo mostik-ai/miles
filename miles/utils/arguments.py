@@ -1179,6 +1179,13 @@ def miles_validate_args(args):
                 f"--use-session-server v2 does not support {', '.join(unsupported)}; v2 returns list[Sample]"
             )
 
+    if args.session_franky_generated_spans and args.use_session_server not in (True, "v1"):
+        raise ValueError(
+            "--session-franky-generated-spans needs the v1 session server (--use-session-server or "
+            "--use-session-server v1), the only one that sends franky_generated_spans; this run has "
+            f"--use-session-server={args.use_session_server!r}"
+        )
+
     if args.use_session_server and args.use_rollout_routing_replay and args.pause_generation_mode == "retract":
         logger.warning(
             "--use-session-server with --use-rollout-routing-replay and "
