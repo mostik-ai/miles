@@ -162,11 +162,14 @@ class LinearTrajectory:
             message_matcher=matcher,
         )
         if config.send_franky_generated_spans:
-            prepared.body["franky_generated_spans"] = [
-                list(span) for span in self._generated_spans_unchanged_in(checkpoint_index, prepared.body["input_ids"])
-            ]
+            prepared.body["franky_generated_spans"] = self._franky_generated_spans(
+                checkpoint_index, prepared.body["input_ids"]
+            )
         self._rollback_to_checkpoint(checkpoint_index)
         return prepared
+
+    def _franky_generated_spans(self, checkpoint_index: int, token_ids: list[int]) -> list[list[int]]:
+        return [list(span) for span in self._generated_spans_unchanged_in(checkpoint_index, token_ids)]
 
     def _generated_spans_unchanged_in(
         self, checkpoint_index: int, token_ids: list[int]
