@@ -3778,6 +3778,7 @@ def _make_skip_zero_advantage_args(**overrides) -> SimpleNamespace:
         moe_z_loss_coeff=None,
         moe_expert_capacity_factor=None,
         moe_router_enable_expert_bias=False,
+        freeze_e_score_correction_bias=False,
         enable_sample_ownership_checker=False,
         delay_split_train_data_by_dp=False,
         indep_dp=False,
@@ -3789,6 +3790,15 @@ def _make_skip_zero_advantage_args(**overrides) -> SimpleNamespace:
 class TestValidateSkipZeroAdvantageSamples:
     def test_a_policy_gradient_alone_passes(self):
         validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args())
+
+    def test_a_frozen_expert_bias_passes(self):
+        validate_skip_zero_advantage_samples(
+            _make_skip_zero_advantage_args(moe_router_enable_expert_bias=True, freeze_e_score_correction_bias=True)
+        )
+
+    def test_an_expert_bias_that_token_counts_update_is_refused(self):
+        with pytest.raises(AssertionError, match="--moe-router-enable-expert-bias without"):
+            validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args(moe_router_enable_expert_bias=True))
 
     @pytest.mark.parametrize(
         "overrides",
