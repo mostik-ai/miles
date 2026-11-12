@@ -148,8 +148,14 @@ class SglRouterBackend(RouterBackend):
     ) -> list[str]:
         primary = ctx.self_addrs["primary"]
         ricky_groups = [group for group in model_cfg.server_groups if not group.serves_franky_sandy]
-        [served_model_name] = {group.overrides.get("served_model_name", group.model_path) for group in ricky_groups}
-        [model_path] = {group.model_path for group in ricky_groups}
+        served_model_name = _shared_by_ricky_groups(
+            {group.overrides.get("served_model_name", group.model_path) for group in ricky_groups},
+            model_name=model_cfg.name,
+            server_arg="served_model_name",
+        )
+        model_path = _shared_by_ricky_groups(
+            {group.model_path for group in ricky_groups}, model_name=model_cfg.name, server_arg="model_path"
+        )
         return [
             *(self.args.sgl_router_path, "--host", resolve_ip(primary.host), "--port", str(primary.port)),
             *("--model-id", served_model_name, "--tokenizer-path", os.path.join(model_path, "tokenizer.json")),
@@ -170,3 +176,13 @@ _BACKEND_CLASSES: dict[RouterKind, type[RouterBackend]] = {
 
 def make_router_backend(args: Namespace) -> RouterBackend:
     return _BACKEND_CLASSES[RouterKind(args.router)](args)
+
+
+def _shared_by_ricky_groups(values: set[str], *, model_name: str, server_arg: str) -> str:
+    if len(values) != 1:
+        raise ValueError(
+            f"sgl-router needs one {server_arg} for model {model_name!r}, but its Ricky server groups have "
+            f"{sorted(values)}"
+        )
+    [value] = values
+    return value
