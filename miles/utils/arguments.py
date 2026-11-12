@@ -414,6 +414,7 @@ def parse_args_and_get_parser(
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     _check_stop_token_replace_streaming_session(args, sglang=sglang)
     _check_multimodal_token_space_processing_args(args, sglang=sglang)
+    _check_router_serves_franky_sandy_groups(args, sglang=sglang)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
         "raw_fsdp": FsdpArgsNamespace(**backend_values) if backend == "fsdp" else None,
@@ -1031,6 +1032,20 @@ def _check_stop_token_replace_streaming_session(args: argparse.Namespace, *, sgl
             "the last generated token, while a streaming session extends the engine's stored tokens append-only. "
             "Change the agent harness so a stop at a role token is followed by the message that token opens and "
             "pass --no-allow-stop-token-replace, or drop --sglang-enable-streaming-session."
+        )
+
+
+def _check_router_serves_franky_sandy_groups(args: argparse.Namespace, *, sglang: SglangConfig) -> None:
+    sandy_model_names = [
+        model.name for model in sglang.models if any(group.serves_franky_sandy for group in model.server_groups)
+    ]
+    if not sandy_model_names:
+        return
+    router = RouterKind(args.router)
+    if router is not RouterKind.SGL_ROUTER:
+        raise ValueError(
+            f"Models {sandy_model_names} have server groups with franky_side: sandy, which only --router sgl_router "
+            f"pairs with their Ricky engines; this run has --router {router.value}"
         )
 
 

@@ -175,6 +175,25 @@ class TestAddArgumentsSupport:
             get_miles_extra_args_provider()(parser)
 
 
+def _write_franky_sglang_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "sglang.yaml"
+    config_path.write_text(
+        "sglang:\n"
+        "  - name: actor\n"
+        "    server_groups:\n"
+        "      - worker_type: regular\n"
+        "        num_gpus: 4\n"
+        "        overrides:\n"
+        "          franky_side: ricky\n"
+        "      - worker_type: regular\n"
+        "        num_gpus: 4\n"
+        "        overrides:\n"
+        "          model_path: /model/sandy\n"
+        "          franky_side: sandy\n"
+    )
+    return config_path
+
+
 class TestRouterFlag:
     @pytest.mark.parametrize(
         ("argv", "expected"),
@@ -209,6 +228,26 @@ class TestRouterFlag:
         path.write_text("router: unknown-router")
         with pytest.raises(ValueError, match="router"):
             parse_megatron_test_config("--custom-config-path", str(path))
+
+    def test_a_franky_sandy_group_is_refused_without_the_sgl_router(self, tmp_path: Path):
+        config_path = _write_franky_sglang_config(tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            parse_megatron_test_config("--sglang-config", str(config_path), "--rollout-num-gpus", "8")
+
+        assert str(exc_info.value) == (
+            "Models ['actor'] have server groups with franky_side: sandy, which only --router sgl_router pairs with "
+            "their Ricky engines; this run has --router sglang"
+        )
+
+    def test_the_sgl_router_takes_a_franky_sandy_group(self, tmp_path: Path):
+        config_path = _write_franky_sglang_config(tmp_path)
+
+        args = parse_megatron_test_config(
+            "--sglang-config", str(config_path), "--rollout-num-gpus", "8", "--router", "sgl_router"
+        )
+
+        assert [group.serves_franky_sandy for group in args.sglang.models[0].server_groups] == [False, True]
 
 
 class TestFullyAsyncDataBufferFlags:
