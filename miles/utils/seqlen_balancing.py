@@ -188,6 +188,22 @@ def first_fit_decreasing_pack(total_lengths, max_tokens_per_bin):
     return _first_fit(order, total_lengths, max_tokens_per_bin)
 
 
+def padded_rows_pack(total_lengths, max_tokens_per_bin) -> list[list[int]]:
+    """Pack rows that are padded to their bin's longest row: rows x longest row <= ``max_tokens_per_bin``.
+
+    Rows are taken longest first and a bin holds consecutive rows, so its rows have similar lengths.
+    A row longer than the budget gets a bin of its own.
+    """
+    order = sorted(range(len(total_lengths)), key=lambda i: -total_lengths[i])
+    bins: list[list[int]] = []
+    for idx in order:
+        if bins and (len(bins[-1]) + 1) * total_lengths[bins[-1][0]] <= max_tokens_per_bin:
+            bins[-1].append(idx)
+        else:
+            bins.append([idx])
+    return bins
+
+
 def _first_fit(order, total_lengths, max_tokens_per_bin) -> list[list[int]]:
     bins: list[list[int]] = []
     bin_sums: list[int] = []

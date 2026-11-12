@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import random
 
-from miles.utils.seqlen_balancing import first_fit_decreasing_pack, first_fit_pack
+from miles.utils.seqlen_balancing import first_fit_decreasing_pack, first_fit_pack, padded_rows_pack
 
 
 def _check_valid(bins, lengths, cap):
@@ -48,3 +48,18 @@ def test_ffd_gain_on_mid_length_distribution():
         total_ff += len(first_fit_pack(lengths, cap))
         total_ffd += len(first_fit_decreasing_pack(lengths, cap))
     assert total_ffd <= total_ff * 0.96, f"expected >=4% bin savings, got FF={total_ff} FFD={total_ffd}"
+
+
+def test_padded_rows_pack_bounds_rows_times_longest_row():
+    rng = random.Random(5)
+    for _ in range(50):
+        cap = rng.randint(50, 400)
+        lengths = [rng.randint(1, cap * 2) for _ in range(rng.randint(1, 64))]
+        bins = padded_rows_pack(lengths, cap)
+        assert sorted(i for b in bins for i in b) == list(range(len(lengths)))
+        for b in bins:
+            assert len(b) == 1 or len(b) * max(lengths[i] for i in b) <= cap
+
+
+def test_padded_rows_pack_groups_rows_of_similar_length():
+    assert padded_rows_pack([10, 1, 9, 1, 1, 1], 20) == [[0, 2], [1, 3, 4, 5]]

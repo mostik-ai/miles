@@ -11,6 +11,7 @@ from miles.utils.seqlen_balancing import (
     expand_bins_by_splitting,
     first_fit_decreasing_pack,
     get_seqlen_balanced_partitions,
+    padded_rows_pack,
 )
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,9 @@ def build_dp_schedule(
                     step_micro_batches = [[i] for i in range(len(step_lengths))]
                 else:
                     step_micro_batches = get_seqlen_balanced_partitions(workloads, micro_batch_count, equal_size=False)
+            elif getattr(args, "qkv_format", None) == "bshd":
+                # bshd pads a micro-batch to its longest row, so the budget bounds rows x longest row.
+                step_micro_batches = padded_rows_pack(step_lengths, max_per_bin)
             else:
                 step_micro_batches = first_fit_decreasing_pack(step_lengths, max_per_bin)
             # Grow the micro-batch count to a multiple of align_to by splitting multi-sample micro-batches.

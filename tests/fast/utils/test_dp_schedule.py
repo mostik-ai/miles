@@ -26,8 +26,10 @@ def make_args(
     max_tokens_per_gpu=None,
     balance_data=False,
     balance_by_flops=False,
+    qkv_format="thd",
 ):
     return SimpleNamespace(
+        qkv_format=qkv_format,
         micro_batch_size=micro_batch_size,
         use_dynamic_batch_size=use_dynamic_batch_size,
         max_tokens_per_gpu=max_tokens_per_gpu,
@@ -443,3 +445,36 @@ def test_train_parallel_config_declares_schedule_support() -> None:
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+def _padded_micro_batch_tokens(schedule, lengths):
+    return [
+        len(rows) * max(lengths[partition[i]] for i in rows)
+        for partition, rank_micro_batches in zip(schedule.partitions, schedule.micro_batch_indices, strict=True)
+        for rows in rank_micro_batches
+    ]
+
+
+def test_bshd_dynamic_micro_batches_stay_within_the_budget_after_padding():
+    lengths = [30_000] + [1_000] * 31
+    schedule = build_dp_schedule(
+        make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=32_000, qkv_format="bshd"),
+        make_tp(dp_size=2),
+        lengths,
+        global_batch_size=32,
+        rollout_indices=list(range(32)),
+    )
+    assert sorted(i for partition in schedule.partitions for i in partition) == list(range(32))
+    assert max(_padded_micro_batch_tokens(schedule, lengths)) <= 32_000
+
+
+def test_thd_dynamic_micro_batches_are_packed_by_real_tokens():
+    lengths = [30_000] + [1_000] * 31
+    schedule = build_dp_schedule(
+        make_args(use_dynamic_batch_size=True, max_tokens_per_gpu=32_000),
+        make_tp(dp_size=2),
+        lengths,
+        global_batch_size=32,
+        rollout_indices=list(range(32)),
+    )
+    assert max(_padded_micro_batch_tokens(schedule, lengths)) > 32_000
