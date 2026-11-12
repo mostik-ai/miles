@@ -128,7 +128,6 @@ def test_a_key_is_sent_when_any_models_router_reads_it(model_cfgs, expected):
 
 
 def test_sgl_router_serves_the_ricky_model_and_takes_workers_over_its_api():
-    """Miles registers each engine with POST /workers; the Ricky engines serve under their model_path."""
     groups = [
         ServerGroupConfig(
             worker_type=WorkerType.REGULAR,
@@ -164,7 +163,6 @@ def test_sgl_router_serves_the_ricky_model_and_takes_workers_over_its_api():
 
 
 def test_sgl_router_serves_the_name_the_ricky_engines_are_served_under():
-    """Agents name the policy as they like through the session server; the Ricky engines serve one fixed name."""
     groups = [
         ServerGroupConfig(
             worker_type=WorkerType.REGULAR,

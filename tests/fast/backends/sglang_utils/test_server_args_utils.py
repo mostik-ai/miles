@@ -156,7 +156,6 @@ class TestServerArgsToArgv:
         _assert_roundtrips(server_args)
 
     def test_a_franky_sandy_serves_its_taps_on_its_own_port(self):
-        """Each Sandy engine of a node needs its own tap bootstrap port."""
         server_args = _server_args(sglang_overrides={"franky_side": "sandy"}, franky_bootstrap_port=20095)
         assert server_args["franky_bootstrap_port"] == 20095
         assert "--franky-bootstrap-port" in server_args_to_argv(server_args)

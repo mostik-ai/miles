@@ -97,7 +97,6 @@ def test_valid_retry_renders_selected_checkpoint_before_rollback():
 
 
 def test_a_turn_sends_the_generated_spans_its_input_ids_still_hold():
-    """A Franky engine computes an earlier answer again with the taps its decode read, so it must know where it is."""
     registry = _make_registry()
     session = registry.get_session(registry.create_session())
     config = make_session_server_config(send_franky_generated_spans=True)

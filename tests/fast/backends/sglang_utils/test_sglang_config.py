@@ -146,7 +146,6 @@ class TestModelPathConsistency:
             )
 
     def test_a_franky_sandy_group_serves_its_own_model_beside_the_ricky_groups(self, tmp_path):
-        """A Sandy prefills its own frozen model for the Ricky engines that read its taps."""
         cfg = _resolve_yaml(
             tmp_path,
             "sglang:\n"
