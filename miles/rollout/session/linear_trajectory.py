@@ -162,7 +162,7 @@ class LinearTrajectory:
             tito_tokenizer=tito_tokenizer,
             message_matcher=matcher,
         )
-        if config.franky_generated_spans:
+        if config.send_franky_generated_spans:
             prepared.body["franky_generated_spans"] = [
                 list(answer) for answer in self._answers_in(checkpoint_index, prepared.body["input_ids"])
             ]

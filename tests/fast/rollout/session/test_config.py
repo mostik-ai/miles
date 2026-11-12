@@ -37,7 +37,7 @@ _ARGS_TO_CONFIG_FIELD = {
     "rollout_top_logprobs_num": "rollout_top_logprobs_num",
     "rollout_sampling_logprobs_mode": "rollout_sampling_logprobs_mode",
     "rollout_temperature": "rollout_temperature",
-    "session_franky_generated_spans": "franky_generated_spans",
+    "session_franky_generated_spans": "send_franky_generated_spans",
 }
 
 _CALL_SITE_FIELDS = ("host", "port", "instance_id", "backend_url")
@@ -210,7 +210,7 @@ _COMPLETE_CONFIG_KWARGS = dict(
     rollout_top_logprobs_num=0,
     rollout_sampling_logprobs_mode="selected",
     rollout_temperature=1.0,
-    franky_generated_spans=False,
+    send_franky_generated_spans=False,
     output_store_backend_config=None,
 )
 

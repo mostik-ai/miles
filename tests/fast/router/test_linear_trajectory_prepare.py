@@ -100,7 +100,7 @@ def test_each_turn_names_the_earlier_answers_it_still_holds_for_franky_engines()
     """A Franky engine computes an earlier answer again with the taps its decode read, so it must know where it is."""
     registry = _make_registry()
     session = registry.get_session(registry.create_session())
-    config = make_session_server_config(franky_generated_spans=True)
+    config = make_session_server_config(send_franky_generated_spans=True)
     _commit(session, [USER], [1, 2], [3, 4])
     _commit(session, [USER, ASSISTANT, TOOL], [1, 2, 3, 4, 5], [6, 7, 8])
     registry.tito_tokenizer.merge_tokens = MagicMock(return_value=[1, 2, 3, 4, 5, 6, 7, 9])
