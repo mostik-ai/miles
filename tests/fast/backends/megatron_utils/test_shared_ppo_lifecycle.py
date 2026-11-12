@@ -695,6 +695,7 @@ def _actor_worker(actor_module: Any) -> Any:
     worker = object.__new__(actor_module.MegatronTrainRayActor)
     worker.args = Namespace(
         colocate=True,
+        offload_train=True,
         compute_advantages_and_returns=True,
         get_mismatch_metrics=False,
         global_batch_size=1,
@@ -928,6 +929,27 @@ def test_offloading_keeps_weight_backup_without_reference_model(
     monkeypatch.setattr(type(worker), "_weight_sync_reads_tms_backup", property(lambda _self: False))
 
     assert worker._enable_weight_backup is offload_train
+
+
+def test_colocated_trainer_that_stays_on_its_gpus_syncs_live_weights_without_a_backup(
+    actor_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    worker = _weight_update_worker(actor_module, monkeypatch)
+    worker.args.colocate = True
+    worker.args.offload_train = False
+    worker.args.offload_train_target = "cpu"
+    worker.with_ref = False
+    worker.with_opd_teacher = False
+    monkeypatch.setattr(actor_module, "is_lora_enabled", lambda _args: True)
+    device_weights = {"weight": object()}
+    worker.weights_backuper = Mock()
+    worker._named_actor_weights = Mock(return_value=device_weights.items())
+
+    assert worker._weight_sync_reads_tms_backup is False
+    assert worker._enable_weight_backup is False
+    assert worker._get_actor_weights() == device_weights
+    worker._named_actor_weights.assert_called_once_with(include_model_companion=False)
+    worker.weights_backuper.get.assert_not_called()
 
 
 @pytest.mark.parametrize("active_tag", ["actor", "ref", "teacher", "old_actor"])
