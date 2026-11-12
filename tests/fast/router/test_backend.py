@@ -127,32 +127,42 @@ def test_a_key_is_sent_when_any_models_router_reads_it(model_cfgs, expected):
     assert backend.routes_by_key(model_cfgs) is expected
 
 
-def test_sgl_router_serves_the_ricky_model_and_takes_workers_over_its_api():
-    groups = [
-        ServerGroupConfig(
-            worker_type=WorkerType.REGULAR,
-            num_gpus_per_engine=1,
-            needs_offload=False,
-            overrides={"model_path": "/models/ricky", "franky_side": "ricky"},
-        ),
-        ServerGroupConfig(
-            worker_type=WorkerType.REGULAR,
-            num_gpus_per_engine=2,
-            needs_offload=False,
-            overrides={"model_path": "/models/sandy", "franky_side": "sandy"},
-        ),
-    ]
-    model_cfg = ModelConfig(name="default", model_path=None, server_groups=groups, update_weights=True)
+def _franky_model_cfg(**ricky_overrides: str) -> ModelConfig:
+    ricky = ServerGroupConfig(
+        worker_type=WorkerType.REGULAR,
+        num_gpus_per_engine=1,
+        needs_offload=False,
+        overrides={"model_path": "/models/ricky", "franky_side": "ricky", **ricky_overrides},
+    )
+    sandy = ServerGroupConfig(
+        worker_type=WorkerType.REGULAR,
+        num_gpus_per_engine=2,
+        needs_offload=False,
+        overrides={"model_path": "/models/sandy", "franky_side": "sandy"},
+    )
+    return ModelConfig(name="default", model_path=None, server_groups=[ricky, sandy], update_weights=True)
+
+
+def _sgl_router_argv(
+    model_cfg: ModelConfig, *, sgl_router_path: str = "sgl-router", sgl_router_args: str = ""
+) -> list[str]:
     args = Namespace(
         router="sgl_router",
-        sgl_router_path="/bin/sgl-router",
-        sgl_router_args="--franky-block-size 256 --policy cache_aware",
+        sgl_router_path=sgl_router_path,
+        sgl_router_args=sgl_router_args,
         sglang_router_request_timeout_secs=600,
         rollout_external_router_pd=False,
     )
     ctx = SimpleNamespace(self_addrs={"primary": SimpleNamespace(host="127.0.0.1", port=30000)})
+    return make_router_backend(args).launch_argv(ctx, model_cfg=model_cfg, interpreter_prefix=["python"])
 
-    argv = make_router_backend(args).launch_argv(ctx, model_cfg=model_cfg, interpreter_prefix=["python"])
+
+def test_sgl_router_serves_the_ricky_model_and_takes_workers_over_its_api():
+    argv = _sgl_router_argv(
+        _franky_model_cfg(),
+        sgl_router_path="/bin/sgl-router",
+        sgl_router_args="--franky-block-size 256 --policy cache_aware",
+    )
 
     assert argv == [
         *("/bin/sgl-router", "--host", "127.0.0.1", "--port", "30000"),
@@ -163,30 +173,7 @@ def test_sgl_router_serves_the_ricky_model_and_takes_workers_over_its_api():
 
 
 def test_sgl_router_serves_the_name_the_ricky_engines_are_served_under():
-    groups = [
-        ServerGroupConfig(
-            worker_type=WorkerType.REGULAR,
-            num_gpus_per_engine=1,
-            needs_offload=False,
-            overrides={"model_path": "/models/ricky", "franky_side": "ricky", "served_model_name": "policy"},
-        ),
-        ServerGroupConfig(
-            worker_type=WorkerType.REGULAR,
-            num_gpus_per_engine=1,
-            needs_offload=False,
-            overrides={"model_path": "/models/sandy", "franky_side": "sandy"},
-        ),
-    ]
-    model_cfg = ModelConfig(name="default", model_path=None, server_groups=groups, update_weights=True)
-    args = Namespace(
-        router="sgl_router",
-        sgl_router_path="sgl-router",
-        sgl_router_args="",
-        sglang_router_request_timeout_secs=600,
-        rollout_external_router_pd=False,
-    )
-    ctx = SimpleNamespace(self_addrs={"primary": SimpleNamespace(host="127.0.0.1", port=30000)})
+    argv = _sgl_router_argv(_franky_model_cfg(served_model_name="policy"))
 
-    argv = make_router_backend(args).launch_argv(ctx, model_cfg=model_cfg, interpreter_prefix=["python"])
-
-    assert argv[5:9] == ["--model-id", "policy", "--tokenizer-path", "/models/ricky/tokenizer.json"]
+    assert argv[argv.index("--model-id") + 1] == "policy"
+    assert argv[argv.index("--tokenizer-path") + 1] == "/models/ricky/tokenizer.json"
