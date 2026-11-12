@@ -164,7 +164,6 @@ class ServerGroupConfig(FrozenStrictBaseModel):
 
     @property
     def serves_franky_sandy(self) -> bool:
-        """A Franky Sandy group prefills its own frozen model for the other groups of its model, which read its taps."""
         return self.overrides.get("franky_side") == "sandy"
 
     @classmethod
