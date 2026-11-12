@@ -155,6 +155,10 @@ class TestServerArgsToArgv:
         assert "--disaggregation-mode" in server_args_to_argv(server_args)
         _assert_roundtrips(server_args)
 
+    @pytest.mark.skipif(
+        "franky_bootstrap_port" not in _record_field_names(ServerArgs),
+        reason="the installed SGLang has no Franky engines; mostik-ai/sglang has",
+    )
     def test_a_franky_sandy_serves_its_taps_on_its_own_port(self):
         server_args = _server_args(sglang_overrides={"franky_side": "sandy"}, franky_bootstrap_port=20095)
         assert server_args["franky_bootstrap_port"] == 20095
