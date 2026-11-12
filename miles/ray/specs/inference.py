@@ -337,6 +337,7 @@ class InferenceEngineSpec(BaseCommandSpec):
         group_scaling = ctx.scaling.sglang_scaling.group(model_name=self.model_cfg.name, group_index=self.group_index)
         interpreter_prefix = self.interpreter_prefix
         dist_init = ctx.self_addrs["dist_init"]
+        franky_bootstrap = ctx.self_addrs.get("franky_bootstrap")
         # TODO: only node 0's seed is used by sglang; node != 0 should get node 0's number
         random_seed = (
             args.seed + group_scaling.engine_offset + ctx.cell_index * num_workers_per_cell + ctx.worker_in_cell_index
@@ -358,7 +359,7 @@ class InferenceEngineSpec(BaseCommandSpec):
             engine_info_bootstrap_port=ctx.self_addrs["engine_info_bootstrap"].port,
             gated_launch_port=ctx.self_addrs[GATE_PORT_NAME].port,
             random_seed=random_seed,
-            franky_bootstrap_port=f.port if (f := ctx.self_addrs.get("franky_bootstrap")) else None,
+            franky_bootstrap_port=franky_bootstrap.port if franky_bootstrap else None,
         )
 
 
