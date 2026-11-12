@@ -148,12 +148,11 @@ class SglRouterBackend(RouterBackend):
     ) -> list[str]:
         primary = ctx.self_addrs["primary"]
         ricky_groups = [group for group in model_cfg.server_groups if not group.serves_franky_sandy]
-        # the router serves the model its Ricky engines are named by: --served-model-name, else their model_path
-        [model_id] = {group.overrides.get("served_model_name", group.model_path) for group in ricky_groups}
+        [served_model_name] = {group.overrides.get("served_model_name", group.model_path) for group in ricky_groups}
         [model_path] = {group.model_path for group in ricky_groups}
         return [
             *(self.args.sgl_router_path, "--host", resolve_ip(primary.host), "--port", str(primary.port)),
-            *("--model-id", model_id, "--tokenizer-path", os.path.join(model_path, "tokenizer.json")),
+            *("--model-id", served_model_name, "--tokenizer-path", os.path.join(model_path, "tokenizer.json")),
             *("--worker-api", "--request-timeout-secs", str(self.args.sglang_router_request_timeout_secs)),
             *shlex.split(self.args.sgl_router_args),
         ]
