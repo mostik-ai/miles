@@ -15,6 +15,7 @@ from miles.backends.sglang_utils.router_args_utils import (
     resolve_router_policies,
     router_args_to_argv,
 )
+from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.router.config import compute_miles_router_config
 from miles.utils.http_utils import resolve_ip
 from miles.utils.workers.argv_utils import config_to_argv
@@ -147,7 +148,11 @@ class SglRouterBackend(RouterBackend):
         self, ctx: LaunchCommandContext, *, model_cfg: "ModelConfig", interpreter_prefix: list[str]
     ) -> list[str]:
         primary = ctx.self_addrs["primary"]
-        ricky_groups = [group for group in model_cfg.server_groups if not group.serves_franky_sandy]
+        ricky_groups = [
+            group
+            for group in model_cfg.server_groups
+            if group.worker_type != WorkerType.PLACEHOLDER and not group.serves_franky_sandy
+        ]
         served_model_name = _shared_by_ricky_groups(
             {group.overrides.get("served_model_name", group.model_path) for group in ricky_groups},
             model_name=model_cfg.name,

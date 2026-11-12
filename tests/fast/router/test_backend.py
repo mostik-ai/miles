@@ -213,3 +213,16 @@ def test_sgl_router_refuses_ricky_groups_without_one_shared_value(server_groups,
         _sgl_router_argv(_franky_model_cfg(*server_groups))
 
     assert str(exc_info.value) == message
+
+
+def test_sgl_router_takes_no_name_from_a_placeholder_group():
+    placeholder = ServerGroupConfig(
+        worker_type=WorkerType.PLACEHOLDER,
+        num_gpus_per_engine=1,
+        needs_offload=False,
+        overrides={"model_path": "/models/ricky"},
+    )
+
+    argv = _sgl_router_argv(_franky_model_cfg(_ricky_group(served_model_name="policy"), placeholder, _SANDY_GROUP))
+
+    assert argv[argv.index("--model-id") + 1] == "policy"
