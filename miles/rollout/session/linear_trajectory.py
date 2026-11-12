@@ -88,8 +88,7 @@ class LinearTrajectory:
     messages: list[dict[str, Any]] = field(default_factory=list)
     records: list[SessionRecord] = field(default_factory=list)
     trajectory_token_ids: list[list[int]] = field(default_factory=list)
-    # per checkpoint, the [start, end) runs of its token_ids that this session generated
-    trajectory_answers: list[tuple[tuple[int, int], ...]] = field(default_factory=list)
+    trajectory_generated_spans: list[tuple[tuple[int, int], ...]] = field(default_factory=list)
     generated_checkpoint_message_ends: list[int] = field(default_factory=list)
     num_assistant: int = 0
     turn_args_history: list[dict[str, Any]] = field(default_factory=list)
@@ -104,7 +103,7 @@ class LinearTrajectory:
             messages=list(self.messages),
             records=list(self.records),
             trajectory_token_ids=list(self.trajectory_token_ids),
-            trajectory_answers=list(self.trajectory_answers),
+            trajectory_generated_spans=list(self.trajectory_generated_spans),
             generated_checkpoint_message_ends=list(self.generated_checkpoint_message_ends),
             turn_args_history=list(self.turn_args_history),
         )
@@ -164,17 +163,18 @@ class LinearTrajectory:
         )
         if config.send_franky_generated_spans:
             prepared.body["franky_generated_spans"] = [
-                list(answer) for answer in self._answers_in(checkpoint_index, prepared.body["input_ids"])
+                list(span) for span in self._generated_spans_unchanged_in(checkpoint_index, prepared.body["input_ids"])
             ]
         self._rollback_to_checkpoint(checkpoint_index)
         return prepared
 
-    def _answers_in(self, checkpoint_index: int, token_ids: list[int]) -> tuple[tuple[int, int], ...]:
-        """The checkpoint's generated runs that *token_ids* still holds unchanged."""
+    def _generated_spans_unchanged_in(
+        self, checkpoint_index: int, token_ids: list[int]
+    ) -> tuple[tuple[int, int], ...]:
         if checkpoint_index < 0:
             return ()
-        return _clip_answers(
-            self.trajectory_answers[checkpoint_index],
+        return _clip_spans(
+            self.trajectory_generated_spans[checkpoint_index],
             _common_prefix_len(self.trajectory_token_ids[checkpoint_index], token_ids),
         )
 
@@ -264,8 +264,9 @@ class LinearTrajectory:
         # prefix rewrite stored history, so the next canonical replay could
         # no longer match its own session.
         self.messages = self.messages + request_messages[len(self.messages) :] + [assistant_message]
-        answer = ((len(prompt_token_ids), len(all_token_ids)),) if completion_token_ids else ()
-        self.trajectory_answers.append(self._answers_in(len(self.trajectory_answers) - 1, prompt_token_ids) + answer)
+        kept_spans = self._generated_spans_unchanged_in(len(self.trajectory_generated_spans) - 1, prompt_token_ids)
+        completion_spans = ((len(prompt_token_ids), len(all_token_ids)),) if completion_token_ids else ()
+        self.trajectory_generated_spans.append(kept_spans + completion_spans)
         self.trajectory_token_ids.append(all_token_ids)
         self.turn_args_history.append(turn_args or {})
         self.generated_checkpoint_message_ends.append(len(request_messages) + 1)
@@ -387,7 +388,7 @@ class LinearTrajectory:
 
         self.messages = self.messages[:rollback_msg_end]
         self.trajectory_token_ids = self.trajectory_token_ids[: checkpoint_index + 1]
-        self.trajectory_answers = self.trajectory_answers[: checkpoint_index + 1]
+        self.trajectory_generated_spans = self.trajectory_generated_spans[: checkpoint_index + 1]
         self.turn_args_history = self.turn_args_history[: checkpoint_index + 1]
         self.records = self.records[: checkpoint_index + 1]
         self.generated_checkpoint_message_ends = self.generated_checkpoint_message_ends[: checkpoint_index + 1]
@@ -399,9 +400,8 @@ def _common_prefix_len(a: list[int], b: list[int]) -> int:
     return next((index for index in range(length) if a[index] != b[index]), length)
 
 
-def _clip_answers(answers: tuple[tuple[int, int], ...], end: int) -> tuple[tuple[int, int], ...]:
-    """The parts of *answers* before position *end*."""
-    return tuple((start, min(stop, end)) for start, stop in answers if start < min(stop, end))
+def _clip_spans(spans: tuple[tuple[int, int], ...], end: int) -> tuple[tuple[int, int], ...]:
+    return tuple((start, min(stop, end)) for start, stop in spans if start < min(stop, end))
 
 
 class SessionRegistry:
