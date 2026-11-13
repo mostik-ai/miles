@@ -59,7 +59,8 @@ class RolloutRelatedConfig(BaseConfig):
         Arg(
             help=(
                 "Run fully async rollout: a persistent worker keeps generating while the trainer "
-                "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function; "
+                "drains completed groups. Selects `FullyAsyncRolloutFn` as the rollout function, or the "
+                "subclass of it that --rollout-function-path names; "
                 "evaluation keeps the standard rollout function, which fully async does not serve. "
                 "Requires train_async.py."
             )
