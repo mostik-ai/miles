@@ -25,6 +25,42 @@ from miles.utils.types import Sample
 
 logger = logging.getLogger(__name__)
 
+# The columns of train data with one value per sample.
+_SAMPLE_KEYS = (
+    "tokens",
+    "multimodal_train_inputs",
+    "multimodal_inputs",
+    "response_lengths",
+    "rewards",
+    "truncated",
+    "loss_masks",
+    "round_number",
+    "sample_indices",
+    "lineage_source_sample_indices",
+    "lineage_output_indices",
+    "lineage_output_counts",
+    "rollout_ids",
+    "rollout_mask_sums",
+    "rollout_log_probs",
+    "rollout_topk_token_ids",
+    "rollout_topk_lengths",
+    "rollout_topk_log_probs",
+    "rollout_sampling_mask_ids",
+    "rollout_sampling_mask_offsets",
+    "rollout_routed_experts",
+    "rollout_indexer_topk",
+    "rollout_store_plan",
+    "prompt",
+    "teacher_log_probs",
+    "opd_reverse_kl",
+    "seq_witness_ids",
+    "weight_versions",
+    "adapter_slots",
+    "loss_weights",
+    "advantages",
+    "target_tokens",
+)
+
 ROLLOUT_DATA_TENSOR_DTYPES = {
     "tokens": "int32",
     "target_tokens": "int32",
@@ -411,6 +447,8 @@ def split_train_data_by_dp(
     the legacy split (the training side schedules locally)."""
     if can_precompute_dp_schedule(args, data, train_parallel_config):
         shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=train_parallel_config)
+    elif args.skip_zero_advantage_samples:
+        raise ValueError("--skip-zero-advantage-samples needs the rollout-side schedule, which this batch cannot use")
     else:
         shards = split_train_data_by_dp_raw(args, data, dp_size=train_parallel_config.dp_size)
     return shards
@@ -436,17 +474,29 @@ def split_train_data_by_dp_scheduled_raw(
     args: Any, data: dict[str, Any], *, train_parallel_config: TrainParallelConfig
 ) -> list[dict[str, Any]]:
     """DP split with the micro-batch schedule precomputed on the rollout side."""
+    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
+    scheduled_rollouts = global_batch_size
+    if args.skip_zero_advantage_samples:
+        rollout_ids = data["rollout_ids"]
+        assert (
+            len(set(rollout_ids)) == len(rollout_ids) == global_batch_size
+        ), "skipping trains each batch in one optimizer step, of one sample per rollout"
+        data = _samples_with_gradient(data, train_parallel_config.micro_batch_alignment)
+        scheduled_rollouts = len(set(data["rollout_ids"]))
+
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
 
-    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
     partitions, micro_batch_indices, num_microbatches, num_rollouts = build_dp_schedule(
         args,
         train_parallel_config,
         total_lengths,
-        global_batch_size=global_batch_size,
+        global_batch_size=scheduled_rollouts,
         rollout_indices=data["rollout_ids"],
     )
+    if args.skip_zero_advantage_samples:
+        # the loss still divides by the whole batch, to which the skipped samples add exactly zero
+        num_rollouts = [global_batch_size]
 
     _log_dp_schedule_trim(args=args, data=data, partitions=partitions)
 
@@ -461,6 +511,17 @@ def split_train_data_by_dp_scheduled_raw(
         shard["micro_batch_indices"] = micro_batch_indices[rank]
         shard["num_rollouts"] = num_rollouts
     return shards
+
+
+def _samples_with_gradient(data: dict[str, Any], align_to: int) -> dict[str, Any]:
+    """``data`` without the samples whose advantage, their reward under GRPO, is exactly zero, which add exactly zero
+    gradient. Keeps the shortest of those needed for a multiple of ``align_to`` samples, the count the schedule can
+    always split into a micro-batch for every rank, whose collectives need one."""
+    rewards = data["rewards"]
+    kept = [i for i, reward in enumerate(rewards) if reward != 0.0]
+    fillers = sorted((i for i, reward in enumerate(rewards) if reward == 0.0), key=lambda i: len(data["tokens"][i]))
+    kept = sorted(kept + fillers[: -len(kept) % align_to if kept else align_to])
+    return {key: [value[i] for i in kept] if key in _SAMPLE_KEYS else value for key, value in data.items()}
 
 
 def _log_dp_schedule_trim(*, args, data: dict[str, Any], partitions: list[list[int]]) -> None:
@@ -506,40 +567,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
         rollout_data = {}
         partition = partitions[i]
         rollout_data["partition"] = partition
-        for key in [
-            "tokens",
-            "multimodal_train_inputs",
-            "multimodal_inputs",
-            "response_lengths",
-            "rewards",
-            "truncated",
-            "loss_masks",
-            "round_number",
-            "sample_indices",
-            "lineage_source_sample_indices",
-            "lineage_output_indices",
-            "lineage_output_counts",
-            "rollout_ids",
-            "rollout_mask_sums",
-            "rollout_log_probs",
-            "rollout_topk_token_ids",
-            "rollout_topk_lengths",
-            "rollout_topk_log_probs",
-            "rollout_sampling_mask_ids",
-            "rollout_sampling_mask_offsets",
-            "rollout_routed_experts",
-            "rollout_indexer_topk",
-            "rollout_store_plan",
-            "prompt",
-            "teacher_log_probs",
-            "opd_reverse_kl",
-            "seq_witness_ids",
-            "weight_versions",
-            "adapter_slots",
-            "loss_weights",
-            "advantages",
-            "target_tokens",
-        ]:
+        for key in _SAMPLE_KEYS:
             if key not in data:
                 continue
             val = [data[key][j] for j in partition]
@@ -568,7 +596,7 @@ def process_rollout_data_shard(args, rollout_data):
     partition = rollout_data.pop("partition")
     total_lengths = rollout_data["total_lengths"]
 
-    # save the seqlen of the whole rollout batch
+    # save the seqlen of the samples this update computes
     Timer().seq_lens = total_lengths
     rollout_data["total_lengths"] = [total_lengths[i] for i in partition]
 

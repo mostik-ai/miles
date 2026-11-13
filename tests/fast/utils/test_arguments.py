@@ -54,6 +54,7 @@ from miles.utils.arguments import (
     validate_log_probs_backend_args,
     validate_miles_ext_kernels_args,
     validate_skip_actor_forward_only,
+    validate_skip_zero_advantage_samples,
 )
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
@@ -4498,3 +4499,46 @@ class TestMultimodalTokenSpaceProcessingArgs:
             _check_multimodal_token_space_processing_args(
                 args, sglang=SglangConfig(models=[actor], base_args=self._SUPPORTED)
             )
+
+
+def _make_skip_zero_advantage_args(**overrides) -> SimpleNamespace:
+    defaults = dict(
+        skip_actor_forward_only=True,
+        advantage_estimator="grpo",
+        use_dynamic_batch_size=True,
+        entropy_coef=0.0,
+        use_kl_loss=False,
+        normalize_advantages=False,
+        calculate_per_token_loss=False,
+        custom_pg_loss_reducer_function_path=None,
+        custom_tis_function_path=None,
+        rollout_data_postprocess_path=None,
+        enable_mtp_training=False,
+        moe_aux_loss_coeff=[0.0],
+        moe_z_loss_coeff=None,
+        moe_expert_capacity_factor=None,
+        moe_router_enable_expert_bias=False,
+        enable_sample_ownership_checker=False,
+        delay_split_train_data_by_dp=False,
+        indep_dp=False,
+        multi_lora_n_adapters=0,
+    )
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+class TestValidateSkipZeroAdvantageSamples:
+    def test_a_policy_gradient_alone_passes(self):
+        validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args())
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"entropy_coef": 0.01}, {"moe_aux_loss_coeff": [0.01]}, {"use_dynamic_batch_size": False}],
+    )
+    def test_what_else_reads_a_skipped_sample_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--skip-zero-advantage-samples"):
+            validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args(**overrides))
+
+    @pytest.mark.parametrize("overrides", [{"indep_dp": True}, {"multi_lora_n_adapters": 2}])
+    def test_a_mode_without_the_rollout_side_schedule_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--skip-zero-advantage-samples is incompatible"):
+            validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args(**overrides))

@@ -105,6 +105,7 @@ def make_train_one_step_args(**overrides: Any) -> Namespace:
         micro_batch_size=1,
         check_for_nan_in_loss_and_grad=True,
         calculate_per_token_loss=False,
+        skip_zero_advantage_samples=False,
         ci_test=False,
         enable_mtp_training=False,
         rollout_max_response_len=512,
