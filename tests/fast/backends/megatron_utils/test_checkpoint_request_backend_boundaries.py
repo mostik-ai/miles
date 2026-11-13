@@ -24,4 +24,5 @@ class TestCheckpointRequestBackendBoundaries:
             "no_load_rng": False,
             "finetune": False,
             "ckpt_step": None,
+            "continued_lora_adapter_dir": None,
         }
