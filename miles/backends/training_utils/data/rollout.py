@@ -627,6 +627,10 @@ def get_data_iterator(
         num_microbatches = [num_local_gbs // args.backend.micro_batch_size for _ in range(num_steps_per_rollout)]
         data_iterator = _generate_data_iterator(rollout_data, args.backend.micro_batch_size)
     else:
+        assert args.qkv_format != "bshd", (
+            "bshd supports --use-dynamic-batch-size only with a rollout-side schedule, which bounds each "
+            "micro-batch after padding; this rollout has none. Please specify --micro-batch-size instead."
+        )
         assert args.max_tokens_per_gpu is not None
         # calculate the number of mirobatches for each step
         samples = rollout_data["total_lengths"]
