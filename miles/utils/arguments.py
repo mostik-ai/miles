@@ -1997,7 +1997,10 @@ def validate_skip_zero_advantage_samples(args) -> None:
             ("--moe-aux-loss-coeff", args.moe_aux_loss_coeff not in (None, 0, [0])),
             ("--moe-z-loss-coeff", args.moe_z_loss_coeff not in (None, 0, [0])),
             ("--moe-expert-capacity-factor", args.moe_expert_capacity_factor is not None),
-            ("--moe-router-enable-expert-bias", args.moe_router_enable_expert_bias),
+            (
+                "--moe-router-enable-expert-bias without --freeze-e-score-correction-bias",
+                args.moe_router_enable_expert_bias and not args.freeze_e_score_correction_bias,
+            ),
             ("--enable-sample-ownership-checker", args.enable_sample_ownership_checker),
             ("--delay-split-train-data-by-dp", args.delay_split_train_data_by_dp),
             ("--indep-dp", args.indep_dp),
