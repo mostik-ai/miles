@@ -208,6 +208,7 @@ def log_rollout_data(rollout_id: int, args: Namespace, rollout_data: RolloutBatc
                 "rollout_topk_lengths",
                 "max_seq_lens",
                 "dynamic_global_batch_size",
+                "computed_loss_token_share",
                 "witness_ids",
                 "weight_versions",
                 "metadata",

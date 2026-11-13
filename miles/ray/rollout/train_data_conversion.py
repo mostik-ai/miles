@@ -100,6 +100,7 @@ ROLLOUT_DATA_VALUE_SPEC: dict[str, ValueSpec] = {
     "raw_reward": ValueSpec(codec="auto"),
     "total_lengths": ValueSpec(codec="auto"),
     "dynamic_global_batch_size": ValueSpec(codec="auto"),
+    "computed_loss_token_share": ValueSpec(codec="auto"),
     "num_microbatches": ValueSpec(codec="auto"),
     "micro_batch_indices": ValueSpec(codec="auto"),
     "num_rollouts": ValueSpec(codec="auto"),
@@ -481,8 +482,10 @@ def split_train_data_by_dp_scheduled_raw(
         assert (
             len(set(rollout_ids)) == len(rollout_ids) == global_batch_size
         ), "skipping trains each batch in one optimizer step, of one sample per rollout"
+        batch_loss_tokens = _count_loss_tokens(data["loss_masks"])
         data = _samples_with_gradient(data, train_parallel_config.micro_batch_alignment)
         scheduled_rollouts = len(set(data["rollout_ids"]))
+        data["computed_loss_token_share"] = _count_loss_tokens(data["loss_masks"]) / batch_loss_tokens
 
     total_lengths = [len(t) for t in data["tokens"]]
     data["total_lengths"] = total_lengths
@@ -522,6 +525,12 @@ def _samples_with_gradient(data: dict[str, Any], align_to: int) -> dict[str, Any
     fillers = sorted((i for i, reward in enumerate(rewards) if reward == 0.0), key=lambda i: len(data["tokens"][i]))
     kept = sorted(kept + fillers[: -len(kept) % align_to if kept else align_to])
     return {key: [value[i] for i in kept] if key in _SAMPLE_KEYS else value for key, value in data.items()}
+
+
+def _count_loss_tokens(loss_masks: list[list[int]]) -> int:
+    """The per-token loss normalizer, as the trainer's ``count_loss_tokens`` counts it: supervised tokens, with a fully
+    masked sample counting as one."""
+    return sum(max(int(sum(loss_mask)), 1) for loss_mask in loss_masks)
 
 
 def _log_dp_schedule_trim(*, args, data: dict[str, Any], partitions: list[list[int]]) -> None:
@@ -577,6 +586,7 @@ def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, An
             "raw_reward",
             "total_lengths",
             "dynamic_global_batch_size",
+            "computed_loss_token_share",
             "prompt_group_sizes",
             "loss_fn",
             "loss_fn_config",

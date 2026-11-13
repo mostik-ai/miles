@@ -211,8 +211,9 @@ class AlgoConfig(BaseConfig):
             help=(
                 "Leave samples whose advantage is exactly zero out of training. They add exactly zero gradient, "
                 "so the update stays the same, up to rounding, while the trainer computes less: the loss still "
-                "divides by the whole batch, and an all-zero batch still steps the optimizer on the shortest "
-                "samples. Training metrics, tokens/s, TFLOPs and MFU then cover only the samples computed."
+                "divides by the whole batch, or by its tokens under --calculate-per-token-loss, and an all-zero "
+                "batch still steps the optimizer on the shortest samples. Training metrics, tokens/s, TFLOPs and "
+                "MFU then cover only the samples computed."
             )
         ),
     ] = False

@@ -1993,7 +1993,6 @@ def validate_skip_zero_advantage_samples(args) -> None:
             ("--entropy-coef", args.entropy_coef != 0),
             ("--use-kl-loss", args.use_kl_loss),
             ("--normalize-advantages", args.normalize_advantages),
-            ("--calculate-per-token-loss", args.calculate_per_token_loss),
             ("--custom-pg-loss-reducer-function-path", args.custom_pg_loss_reducer_function_path is not None),
             ("--custom-tis-function-path", args.custom_tis_function_path is not None),
             ("--rollout-data-postprocess-path", args.rollout_data_postprocess_path is not None),

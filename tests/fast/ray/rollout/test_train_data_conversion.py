@@ -1327,6 +1327,11 @@ class TestSkipZeroAdvantageSamples:
         assert all(shard["num_rollouts"] == [4] for shard in shards)
         assert all(shard["raw_reward"] == [1.0, 0.0, -1.0, 0.0] for shard in shards)
 
+    def test_the_shards_carry_the_share_of_the_batch_loss_tokens_computed(self):
+        shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40])
+
+        assert all(shard["computed_loss_token_share"] == (10 + 30) / (10 + 20 + 30 + 40) for shard in shards)
+
     def test_the_timer_counts_only_the_samples_computed(self):
         shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40])
 

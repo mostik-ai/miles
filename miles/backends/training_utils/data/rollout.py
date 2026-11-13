@@ -273,8 +273,9 @@ def get_batch(
         keys = [*keys, "adapter_slots"]
     batch = data_iterator.get_next(keys)
 
-    if "dynamic_global_batch_size" in data_iterator.rollout_data:
-        batch["dynamic_global_batch_size"] = data_iterator.rollout_data["dynamic_global_batch_size"]
+    for batch_wide_key in ("dynamic_global_batch_size", "computed_loss_token_share"):
+        if batch_wide_key in data_iterator.rollout_data:
+            batch[batch_wide_key] = data_iterator.rollout_data[batch_wide_key]
 
     for unit_key in ("loss_fn", "loss_fn_config"):
         if unit_key in data_iterator.rollout_data:
