@@ -281,7 +281,8 @@ class MegatronTrainRayActor(TrainRayActor):
             with self.args.backend.mutable():
                 self.args.backend.vocab_size = self.tokenizer.vocab_size
 
-        if is_lora_enabled(args) and args.lora_adapter_path is not None:
+        continued_lora_adapter_dir = ckpt_load_config.continued_lora_adapter_dir
+        if is_lora_enabled(args) and (args.lora_adapter_path is not None or continued_lora_adapter_dir is not None):
             self._build_adapter_slots(
                 get_hf_weight_iterator(
                     args,
@@ -297,6 +298,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 checkpointing_context=checkpointing_context,
                 overrider_for_loading=heal_load_overrides,
                 resume_from_ckpt=ckpt_load_config.resume_from_ckpt,
+                continued_lora_adapter_dir=continued_lora_adapter_dir,
             )
 
         self._init_training_state()
@@ -458,7 +460,12 @@ class MegatronTrainRayActor(TrainRayActor):
         return load_output.start_rollout_id
 
     def _load_state_core(
-        self, *, checkpointing_context: dict | None, overrider_for_loading: dict[str, object], resume_from_ckpt: bool
+        self,
+        *,
+        checkpointing_context: dict | None,
+        overrider_for_loading: dict[str, object],
+        resume_from_ckpt: bool,
+        continued_lora_adapter_dir: str | None = None,
     ) -> LoadCheckpointOutput:
         with self.args.backend.mutable(), inplace_modify_args(self.args.backend, overrider_for_loading):
             load_output = load_model_state(
@@ -470,6 +477,7 @@ class MegatronTrainRayActor(TrainRayActor):
                 checkpointing_context=checkpointing_context,
                 resume_from_ckpt=resume_from_ckpt,
                 adapter_slots=self.adapter_slots,
+                continued_lora_adapter_dir=continued_lora_adapter_dir,
             )
 
         if self.role != "critic":

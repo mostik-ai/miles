@@ -1043,6 +1043,7 @@ def load_model_state(
     checkpointing_context: dict | None,
     resume_from_ckpt: bool,
     adapter_slots: BridgeAdapterSlots | NativeAdapterSlots | None = None,
+    continued_lora_adapter_dir: str | None = None,
 ) -> LoadCheckpointOutput:
     if is_multi_lora_enabled(args) and args.megatron_to_hf_mode == "bridge":
         # Hide adapter params so the bridge's conversion-task walk doesn't see them
@@ -1085,9 +1086,15 @@ def load_model_state(
         scheduler_restored = False
 
     adapter_iteration, adapter_first_rollout = None, 0
-    if is_lora_enabled(args) and role == "actor" and args.lora_adapter_path is not None:
+    restores_adapter = args.lora_adapter_path is not None or continued_lora_adapter_dir is not None
+    if is_lora_enabled(args) and role == "actor" and restores_adapter:
         restored = restore_single_lora(
-            model, args, adapter_slots=adapter_slots, optimizer=optimizer, opt_param_scheduler=opt_param_scheduler
+            model,
+            args,
+            adapter_slots=adapter_slots,
+            optimizer=optimizer,
+            opt_param_scheduler=opt_param_scheduler,
+            continued_save=None if continued_lora_adapter_dir is None else Path(continued_lora_adapter_dir),
         )
         adapter_iteration, adapter_first_rollout = restored.iteration, restored.first_rollout
         if adapter_iteration is not None:

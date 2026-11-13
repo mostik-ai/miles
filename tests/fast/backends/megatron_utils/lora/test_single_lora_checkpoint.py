@@ -23,6 +23,7 @@ from miles.backends.megatron_utils.lora.checkpoint import (
     _set_distributed_optimizer_step,
     _world_slice,
     restore_single_lora,
+    save_single_lora,
 )
 from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter
 from miles.backends.megatron_utils.lora.utils import _adapter_shard_params
@@ -33,11 +34,12 @@ from miles.backends.training_utils.checkpoint.adapter.parametrization_conversion
 )
 from miles.backends.training_utils.checkpoint.adapter.readers import AdapterSourceKind
 from miles.backends.training_utils.checkpoint.adapter.source_error import AdapterSourceError
+from miles.backends.training_utils.checkpoint.tracker import read_checkpoint_tracker_iteration
 
 _MODULE = "miles.backends.megatron_utils.lora.checkpoint"
 
 
-def _restore(path, *, convert_save=None):
+def _restore(path, *, convert_save=None, continued_save=None):
     """``restore_single_lora`` with the model-facing pieces mocked; returns (its result, scheduler, mocks)."""
     args = SimpleNamespace(
         hf_checkpoint="/hf",
@@ -65,9 +67,45 @@ def _restore(path, *, convert_save=None):
     ) as mocks:
         mocks["load_adapter_source"].return_value = SimpleNamespace(lora_alpha=16.0)
         restored = restore_single_lora(
-            [], args, adapter_slots=slots, optimizer=MagicMock(), opt_param_scheduler=scheduler
+            [],
+            args,
+            adapter_slots=slots,
+            optimizer=MagicMock(),
+            opt_param_scheduler=scheduler,
+            continued_save=continued_save,
         )
     return restored, scheduler, mocks
+
+
+def test_a_restarted_run_restores_its_own_save_with_the_optimizer_and_converts_nothing(tmp_path):
+    # --no-load-optim is set, as for a base that loads fresh; the run's own save still restores its optimizer
+    own_save = tmp_path / "iter_0000007" / "adapter"
+    training_state = {"iteration": 7, "first_rollout": 0, "opt_param_scheduler": {"num_steps": 56}}
+    with patch(f"{_MODULE}.read_training_state", return_value=training_state):
+        restored, scheduler, mocks = _restore(
+            tmp_path / "initial-adapter", convert_save=str(tmp_path / "converted"), continued_save=own_save
+        )
+    assert restored == (7, True, 0)
+    assert mocks["load_adapter_source"].call_args.args[0] == own_save
+    assert mocks["load_adapter_source"].call_args.kwargs["load_optimizer"] is True
+    mocks["save_and_commit_adapter_dir"].assert_not_called()
+    scheduler.load_state_dict.assert_called_once_with({"num_steps": 56})
+
+
+def test_a_save_names_its_iteration_in_the_tracker_a_restarted_run_reads(tmp_path):
+    args = SimpleNamespace(
+        lora_dropout=0.05,
+        backend=SimpleNamespace(save=str(tmp_path), no_save_optim=False, use_precision_aware_optimizer=False),
+    )
+    with patch.multiple(
+        _MODULE,
+        DistributedOptimizerMembers=DEFAULT,
+        save_and_commit_adapter_dir=DEFAULT,
+        single_lora_parametrization=DEFAULT,
+    ) as mocks:
+        save_single_lora([], MagicMock(), None, MagicMock(), args, 5, 0)
+    assert mocks["save_and_commit_adapter_dir"].call_args.args[:2] == (tmp_path / "iter_0000005", "adapter")
+    assert read_checkpoint_tracker_iteration(tmp_path) == 5
 
 
 def test_an_old_format_save_resumes_its_iteration_whichever_reader_loads_the_weights(tmp_path):

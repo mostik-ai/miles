@@ -16,6 +16,8 @@ class MegatronCkptLoadConfig(FrozenStrictBaseModel):
     no_load_rng: bool | None
     finetune: bool | None
     ckpt_step: int | None
+    # the newest adapter a LoRA run saved under --load; the trainer restores it over the base weights
+    continued_lora_adapter_dir: str | None = None
 
     @classmethod
     def for_peer_recovery(cls) -> Self:

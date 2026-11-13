@@ -12,6 +12,7 @@ from typing import Any, ClassVar, Literal
 import pydantic
 import yaml
 
+from miles.backends.training_utils.checkpoint.tracker import tracked_lora_adapter_dir
 from miles.utils.args.custom_function import resolve_custom_function_overrides
 from miles.utils.args.enhanced_argparse_namespace import EnhancedArgparseNamespace, SerializableConfigDict
 from miles.utils.file_arg_utils import resolve_file_arg
@@ -465,7 +466,8 @@ def resolve_args_checkpoint_load(args: Namespace, *, role: str) -> bool:
             raise ValueError("an explicit checkpoint selection requires --load")
         return resume_from_ckpt
 
-    if resume_from_ckpt:
+    # a LoRA save holds only the adapter: its base loads as in a fresh run, and the trainer restores the adapter
+    if resume_from_ckpt and tracked_lora_adapter_dir(args.load) is None:
         return True
 
     # TODO: During loading, we need to set the start_rollout_id here.
@@ -484,7 +486,7 @@ def resolve_args_checkpoint_load(args: Namespace, *, role: str) -> bool:
             args.ckpt_step = args.ref_ckpt_step
         args.start_rollout_id = 0
 
-    return resume_from_ckpt
+    return False
 
 
 def has_megatron_checkpoint(load_dir: str | None, ckpt_step: int | None = None) -> bool:

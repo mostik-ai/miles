@@ -12,6 +12,7 @@ from miles.backends.megatron_utils.megatron_config import (
     resolve_args_checkpoint_load,
 )
 from miles.backends.torchtitan_utils.args_namespace import TorchtitanArgsNamespace
+from miles.backends.training_utils.checkpoint.tracker import tracked_lora_adapter_dir
 from miles.utils.args.configs.backend_fields import TrainerBackendTraitConfig
 from miles.utils.args.configs.scaling import ScalingConfig
 from miles.utils.args.runtime import AllConfig, OrchestratorConfig, TrainerConfig
@@ -52,6 +53,7 @@ def compute_trainer_ckpt_load_config(
         args.load = compute_trainer_checkpoint_dir(base_dir=args.load, trainer_id=trainer.trainer_id)
 
     resume_from_ckpt = resolve_args_checkpoint_load(args, role=trainer.role)
+    continued_lora_adapter_dir = None if resume_from_ckpt else tracked_lora_adapter_dir(args.requested_load)
     return MegatronCkptLoadConfig(
         load=args.load,
         resume_from_ckpt=resume_from_ckpt,
@@ -59,6 +61,7 @@ def compute_trainer_ckpt_load_config(
         no_load_rng=args.no_load_rng,
         finetune=args.finetune,
         ckpt_step=args.ckpt_step,
+        continued_lora_adapter_dir=None if continued_lora_adapter_dir is None else str(continued_lora_adapter_dir),
     )
 
 

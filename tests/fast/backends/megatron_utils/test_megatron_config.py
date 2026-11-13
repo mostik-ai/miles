@@ -489,6 +489,19 @@ class TestResolveArgsCheckpointLoad:
         assert (args.no_load_optim, args.no_load_rng, args.finetune) == (False, False, False)
         assert (args.ckpt_step, args.start_rollout_id) == (None, None)
 
+    def test_a_run_restarted_on_its_own_lora_save_loads_its_base_as_a_fresh_run(self, tmp_path):
+        """A LoRA save holds adapters only, so Megatron's loader has no model to read under --load."""
+        load = _write_megatron_checkpoint(tmp_path)
+        (tmp_path / "save" / "iter_0000010" / "adapter").mkdir(parents=True)
+        args = _make_checkpoint_args(tmp_path, load=load)
+
+        resume_from_ckpt = resolve_args_checkpoint_load(args, role="actor")
+
+        assert resume_from_ckpt is False
+        assert args.load == str(tmp_path / "ref")
+        assert args.requested_load == load
+        assert (args.no_load_optim, args.no_load_rng, args.finetune) == (True, True, True)
+
     @pytest.mark.parametrize(
         "selector",
         [{"ckpt_step": 0}, {"ckpt_step": 7}, {"exit_on_missing_checkpoint": True}],

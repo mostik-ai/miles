@@ -39,9 +39,25 @@ class TestCheckpointLoadInputs:
         assert before_request.finetune is True
         assert after_request.load == str(load)
         assert after_request.resume_from_ckpt is True
+        assert after_request.continued_lora_adapter_dir is None
         assert not after_request.no_load_optim
         assert not after_request.no_load_rng
         assert not after_request.finetune
+
+    def test_a_lora_save_under_load_is_restored_over_the_reference_weights(self, tmp_path: Path) -> None:
+        """A LoRA save holds adapters only: the base loads as in a fresh launch and the trainer restores the adapter."""
+        load = tmp_path / "run"
+        adapter = load / "iter_0000003" / "adapter"
+        adapter.mkdir(parents=True)
+        (load / "latest_checkpointed_iteration.txt").write_text("3")
+        args = parse_megatron_test_config("--load", str(load), "--ref-load", str(tmp_path / "reference"))
+        [trainer] = args.raw_megatron.trainers
+
+        request = compute_trainer_ckpt_load_config(args, trainer)
+
+        assert request.load == str(tmp_path / "reference")
+        assert request.resume_from_ckpt is False
+        assert request.continued_lora_adapter_dir == str(adapter)
 
     @pytest.mark.parametrize("same_path", [False, True])
     def test_reference_fallback_does_not_mutate_the_orchestrator_inputs(self, tmp_path: Path, same_path: bool) -> None:

@@ -46,6 +46,7 @@ from miles.backends.training_utils.checkpoint.adapter.adapter_state import (
     AdapterState,
     agree_on_failure_context,
     gloo_group,
+    is_rank0,
     raise_if_any_rank_failed,
 )
 from miles.backends.training_utils.checkpoint.adapter.parametrization import (
@@ -54,6 +55,11 @@ from miles.backends.training_utils.checkpoint.adapter.parametrization import (
 )
 from miles.backends.training_utils.checkpoint.adapter.readers import AdapterSourceKind, read_source_lora_alpha
 from miles.backends.training_utils.checkpoint.adapter.source_error import AdapterSourceError, require_fields
+from miles.backends.training_utils.checkpoint.tracker import (
+    LORA_ADAPTER_DIRNAME,
+    lora_adapter_checkpoint_dir,
+    write_checkpoint_tracker_iteration,
+)
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.utils.hf_utils.config import load_hf_config
 
@@ -652,7 +658,8 @@ def save_single_lora(
     iteration: int,
     first_rollout: int,
 ):
-    """``{save}/iter_N/adapter``: adapter state, training state and the PEFT export, committed by rank 0."""
+    """``{save}/iter_N/adapter``: adapter state, training state and the PEFT export, committed by rank 0, which then
+    names the iteration in ``{save}``'s tracker so a restarted run continues from it."""
     members = DistributedOptimizerMembers(
         adapter_slots,
         optimizer,
@@ -668,8 +675,8 @@ def save_single_lora(
         "opt_param_scheduler": opt_param_scheduler.state_dict() if opt_param_scheduler is not None else None,
     }
     save_and_commit_adapter_dir(
-        Path(args.backend.save) / f"iter_{iteration:07d}",
-        "adapter",
+        lora_adapter_checkpoint_dir(args.backend.save, iteration).parent,
+        LORA_ADAPTER_DIRNAME,
         members,
         0,
         single_lora_parametrization(adapter_slots, args),
@@ -677,6 +684,8 @@ def save_single_lora(
         training_state=training_state,
         lora_dropout=args.lora_dropout,
     )
+    if is_rank0():
+        write_checkpoint_tracker_iteration(args.backend.save, iteration)
 
 
 class AdapterRestore(NamedTuple):
@@ -687,18 +696,44 @@ class AdapterRestore(NamedTuple):
     first_rollout: int
 
 
+class _RestoreSource(NamedTuple):
+    path: Path
+    restores_optimizer_state: bool
+    convert_save: Path | None
+
+
+def _restore_source(args, continued_save: Path | None) -> _RestoreSource:
+    if continued_save is not None:
+        # the run's own save holds optimizer state unless the run saves none; --no-load-optim is about the base load
+        return _RestoreSource(continued_save, not args.backend.no_save_optim, None)
+    convert_save = args.lora_adapter_convert_save
+    return _RestoreSource(
+        Path(args.lora_adapter_path),
+        not args.backend.no_load_optim,
+        None if convert_save is None else Path(convert_save),
+    )
+
+
 def restore_single_lora(
-    model, args, *, adapter_slots: BridgeAdapterSlots | NativeAdapterSlots, optimizer, opt_param_scheduler
+    model,
+    args,
+    *,
+    adapter_slots: BridgeAdapterSlots | NativeAdapterSlots,
+    optimizer,
+    opt_param_scheduler,
+    continued_save: Path | None = None,
 ) -> AdapterRestore:
-    """``--lora-adapter-path`` from any recognized source; returns the saved iteration when the source has one,
+    """``--lora-adapter-path`` from any recognized source, or ``continued_save`` (the newest adapter the run itself
+    saved under ``--load``) when a restarted run has one; returns the saved iteration when the source has one,
     whether it restored the scheduler, and the rollout the saving run's schedule started at.
 
-    ``--lora-adapter-convert-save`` then commits the loaded state there in the adapter format.
+    ``--lora-adapter-convert-save`` then commits a loaded ``--lora-adapter-path`` there in the adapter format.
     """
-    assert adapter_slots is not None, "the actor builds the adapter slots before restoring --lora-adapter-path"
+    assert adapter_slots is not None, "the actor builds the adapter slots before restoring an adapter"
     slots, targets = adapter_slots, adapter_slots.targets
+    path, restores_optimizer_state, convert_save = _restore_source(args, continued_save)
     # without an optimizer (--debug-disable-optimizer) only the weights load, as on main
-    load_optimizer = optimizer is not None and not args.backend.no_load_optim
+    load_optimizer = optimizer is not None and restores_optimizer_state
     # a convert-save writes moments only when they were loaded
     members = (
         ModelWeightMembers(slots)
@@ -712,7 +747,6 @@ def restore_single_lora(
         )
     )
     run = single_lora_parametrization(slots, args)
-    path = Path(args.lora_adapter_path)
     in_model_loaders_by_kind = {
         AdapterSourceKind.LEGACY_RANK_SHARD: LegacyRankShardLoader(
             model, optimizer, run, load_optimizer, precision_aware=args.backend.use_precision_aware_optimizer
@@ -742,11 +776,10 @@ def restore_single_lora(
         return AdapterRestore(None, False, 0)
     # an old-format save holds its training state beside the rank shards, whichever reader loaded the weights
     training_state = read_training_state(path) or _read_legacy_training_state(path)
-    if args.lora_adapter_convert_save is not None:
-        destination = Path(args.lora_adapter_convert_save)
+    if convert_save is not None:
         save_and_commit_adapter_dir(
-            destination.parent,
-            destination.name,
+            convert_save.parent,
+            convert_save.name,
             members,
             0,
             run,
