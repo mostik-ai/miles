@@ -45,6 +45,7 @@ from miles.backends.training_utils.model_companion import (
     ModelCompanionWeightVersionUtils,
 )
 from miles.backends.training_utils.replay.data import fill_replay_data, register_replay_list_sequential
+from miles.backends.training_utils.replay.expert_load import log_expert_parallel_load
 from miles.backends.training_utils.types import TrainStepOutput
 from miles.backends.training_utils.weight_update.hf_weight_iterator import WeightUpdatePlacement
 from miles.backends.training_utils.weight_update.snapshot_publisher import SnapshotPublisher
@@ -758,6 +759,12 @@ class MegatronTrainRayActor(TrainRayActor):
             self.args, f"use_rollout_{m.name}_replay", False
         )  # config-access-exempt: attribute selected at runtime from f'use_rollout_{m.name}_replay'
 
+    def _log_expert_parallel_load(self, rollout_id: int, routed_experts: list[torch.Tensor]) -> None:
+        parallel_state = get_parallel_state()
+        if parallel_state.tp.rank or parallel_state.cp.rank or parallel_state.pp.rank:
+            return
+        log_expert_parallel_load(rollout_id, routed_experts, self.args.backend.num_experts, parallel_state.ep.size)
+
     @with_logs
     def _train_actor(
         self,
@@ -779,6 +786,8 @@ class MegatronTrainRayActor(TrainRayActor):
 
         for m in all_replay_managers:
             if self._use_rollout_replay(m):
+                if m is routing_replay_manager and self.args.log_routing_replay_expert_load:
+                    self._log_expert_parallel_load(rollout_id, rollout_data[m.data_key])
                 fill_replay_data(
                     args=self.args,
                     models=self.model,

@@ -182,3 +182,28 @@ def test_staged_ids_compile_once_under_activation_checkpointing(monkeypatch):
 
     assert counter.frame_count == 1, f"{counter.frame_count} compiles for {len(ids)} microbatches"
     assert [replay.backward_index for replay in replays] == [0, 0, 0]
+
+
+def test_routing_rows_with_nothing_to_replay_take_the_experts_in_turn():
+    # arange would send every such row to experts 0..topk-1, which a single expert-parallel rank holds
+    scores = torch.tensor([[0.1, 0.5, 0.2, 0.9], [0.4, 0.3, 0.2, 0.1], [0.6, 0.7, 0.8, 0.9], [0.9, 0.1, 0.5, 0.3]])
+    replayed = torch.tensor([[-1, -1], [2, 0], [-1, -1], [-1, -1]], dtype=torch.int32)
+    manager = _make_routing_replay_manager(replayed)
+    topk_fn = manager.get_topk_fn(lambda s, k: torch.topk(s, k, dim=1), return_probs=True)
+
+    probs, top_indices = topk_fn(scores, 2)
+
+    torch.testing.assert_close(top_indices, torch.tensor([[0, 1], [2, 0], [2, 3], [0, 1]], dtype=torch.int32))
+    torch.testing.assert_close(probs, torch.tensor([[0.1, 0.5], [0.2, 0.4], [0.8, 0.9], [0.9, 0.1]]))
+
+
+def test_routing_rows_with_nothing_to_replay_load_every_expert_equally():
+    num_experts, topk, num_rows = 8, 3, 16
+    manager = _make_routing_replay_manager(torch.full((num_rows, topk), -1, dtype=torch.int32))
+    topk_fn = manager.get_topk_fn(lambda s, k: torch.topk(s, k, dim=1), return_probs=False)
+
+    top_indices = topk_fn(torch.zeros(num_rows, num_experts), topk)
+
+    rows_per_expert = torch.bincount(top_indices.flatten(), minlength=num_experts).tolist()
+    assert rows_per_expert == [num_rows * topk // num_experts] * num_experts
+    assert all(len(set(row)) == topk for row in top_indices.tolist())
