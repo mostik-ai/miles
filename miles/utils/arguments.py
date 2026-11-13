@@ -414,6 +414,7 @@ def parse_args_and_get_parser(
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     _check_stop_token_replace_streaming_session(args, sglang=sglang)
     _check_multimodal_token_space_processing_args(args, sglang=sglang)
+    _check_router_serves_franky_sandy_groups(args, sglang=sglang)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
         "raw_fsdp": FsdpArgsNamespace(**backend_values) if backend == "fsdp" else None,
@@ -1034,6 +1035,20 @@ def _check_stop_token_replace_streaming_session(args: argparse.Namespace, *, sgl
         )
 
 
+def _check_router_serves_franky_sandy_groups(args: argparse.Namespace, *, sglang: SglangConfig) -> None:
+    sandy_model_names = [
+        model.name for model in sglang.models if any(group.serves_franky_sandy for group in model.server_groups)
+    ]
+    if not sandy_model_names:
+        return
+    router = RouterKind(args.router)
+    if router is not RouterKind.SGL_ROUTER:
+        raise ValueError(
+            f"Models {sandy_model_names} have server groups with franky_side: sandy, which only --router sgl_router "
+            f"pairs with their Ricky engines; this run has --router {router.value}"
+        )
+
+
 def _apply_custom_config(args, data: dict) -> None:
     # configs written before --router
     if data.pop("use_miles_router", False):
@@ -1178,6 +1193,13 @@ def miles_validate_args(args):
             raise ValueError(
                 f"--use-session-server v2 does not support {', '.join(unsupported)}; v2 returns list[Sample]"
             )
+
+    if args.session_franky_generated_spans and args.use_session_server not in (True, "v1"):
+        raise ValueError(
+            "--session-franky-generated-spans needs the v1 session server (--use-session-server or "
+            "--use-session-server v1), the only one that sends franky_generated_spans; this run has "
+            f"--use-session-server={args.use_session_server!r}"
+        )
 
     if args.use_session_server and args.use_rollout_routing_replay and args.pause_generation_mode == "retract":
         logger.warning(

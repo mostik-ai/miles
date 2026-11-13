@@ -54,6 +54,7 @@ def compute_engine_launch_cmd(
     engine_info_bootstrap_port: int,
     gated_launch_port: int,
     random_seed: int,
+    franky_bootstrap_port: int | None = None,
 ) -> str:
     _assert_launch_gate_served()
 
@@ -72,6 +73,7 @@ def compute_engine_launch_cmd(
         num_gpus_per_engine=num_gpus_per_engine,
         gated_launch_port=gated_launch_port,
         random_seed=random_seed,
+        franky_bootstrap_port=franky_bootstrap_port,
     )
 
     launch_args = {**server_args_dict, "host": server_args_dict["host"].strip("[]")}
@@ -94,6 +96,7 @@ def _compute_server_args(
     num_gpus_per_engine: int | None,
     gated_launch_port: int,
     random_seed: int,
+    franky_bootstrap_port: int | None = None,
 ):
     base_args = args.sglang.base_args
     _gpus_per_engine = num_gpus_per_engine or args.rollout_num_gpus_per_engine
@@ -155,6 +158,8 @@ def _compute_server_args(
         kwargs.update(sglang_output_store_server_args(args, local_hostname=host.strip("[]")))
     if engine_info_bootstrap_port is not None:
         kwargs["engine_info_bootstrap_port"] = engine_info_bootstrap_port
+    if franky_bootstrap_port is not None:
+        kwargs["franky_bootstrap_port"] = franky_bootstrap_port
 
     if is_multi_lora_enabled(args):
         kwargs["enable_lora"] = True

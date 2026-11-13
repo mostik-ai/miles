@@ -25,6 +25,13 @@ class SessionConfig(BaseConfig):
         ),
     ] = False
     session_server_workers: A[int, Arg(help="Number of session server instances.")] = 32
+    session_franky_generated_spans: A[
+        bool,
+        Arg(
+            help="Send each turn's earlier answers as franky_generated_spans: [start, end) runs of its input_ids that "
+            "the session generated. A Franky engine computes them again with the taps their decode read."
+        ),
+    ] = False
     session_server_ip: A[
         str | None,
         Arg(

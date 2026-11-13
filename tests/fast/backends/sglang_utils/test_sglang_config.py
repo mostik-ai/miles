@@ -145,6 +145,29 @@ class TestModelPathConsistency:
                 rollout_num_gpus=8,
             )
 
+    def test_a_franky_sandy_group_serves_its_own_model_beside_the_ricky_groups(self, tmp_path):
+        cfg = _resolve_yaml(
+            tmp_path,
+            "sglang:\n"
+            "  - name: actor\n"
+            "    model_path: /model/ricky\n"
+            "    server_groups:\n"
+            "      - worker_type: regular\n"
+            "        num_gpus: 4\n"
+            "        overrides:\n"
+            "          franky_side: ricky\n"
+            "      - worker_type: regular\n"
+            "        num_gpus: 4\n"
+            "        overrides:\n"
+            "          model_path: /model/sandy\n"
+            "          franky_side: sandy\n",
+            rollout_num_gpus=8,
+        )
+        groups = cfg.models[0].server_groups
+
+        assert [group.model_path for group in groups] == ["/model/ricky", "/model/sandy"]
+        assert [group.serves_franky_sandy for group in groups] == [False, True]
+
     def test_multi_lora_engines_may_serve_a_quantized_copy_of_the_base(self, tmp_path):
         """Tinker engines never receive base weights, so they may load another copy of the base than the trainer."""
         cfg = _resolve_yaml(

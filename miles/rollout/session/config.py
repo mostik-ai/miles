@@ -41,6 +41,7 @@ class SessionServerConfig(FrozenStrictBaseModel):
     rollout_top_logprobs_num: int
     rollout_sampling_logprobs_mode: str
     rollout_temperature: float
+    send_franky_generated_spans: bool
     # The run's output store with --use-output-store, else None; the server resolves its own local_hostname.
     output_store_backend_config: dict[str, Any] | None
 
@@ -81,6 +82,7 @@ def compute_session_server_config(
         rollout_temperature=getattr(
             args, "rollout_temperature", 1.0
         ),  # config-access-exempt: legacy session inputs omit rollout_temperature
+        send_franky_generated_spans=args.session_franky_generated_spans,
         output_store_backend_config=(output_store_backend_config(args) if args.use_output_store else None),
     )
 

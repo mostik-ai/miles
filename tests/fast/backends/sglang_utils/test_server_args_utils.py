@@ -87,6 +87,7 @@ def _server_args(
     disaggregation_bootstrap_port: int | None = None,
     num_gpus_per_engine: int = 1,
     random_seed: int = 0,
+    franky_bootstrap_port: int | None = None,
 ) -> dict:
     # ServerArgs probes the local accelerator when no device is given, which a CPU-only
     # CI runner cannot answer. Production resolves it to the engine's own device the same way.
@@ -106,6 +107,7 @@ def _server_args(
         sglang_overrides=overrides,
         num_gpus_per_engine=num_gpus_per_engine,
         random_seed=random_seed,
+        franky_bootstrap_port=franky_bootstrap_port,
     )
     return server_args_dict
 
@@ -152,6 +154,15 @@ class TestServerArgsToArgv:
         assert server_args["disaggregation_mode"] == "prefill"
         assert "--disaggregation-mode" in server_args_to_argv(server_args)
         _assert_roundtrips(server_args)
+
+    @pytest.mark.skipif(
+        "franky_bootstrap_port" not in _record_field_names(ServerArgs),
+        reason="the installed SGLang has no Franky engines; mostik-ai/sglang has",
+    )
+    def test_a_franky_sandy_serves_its_taps_on_its_own_port(self):
+        server_args = _server_args(sglang_overrides={"franky_side": "sandy"}, franky_bootstrap_port=20095)
+        assert server_args["franky_bootstrap_port"] == 20095
+        assert "--franky-bootstrap-port" in server_args_to_argv(server_args)
 
     def test_a_decode_worker_roundtrips(self):
         """PD-disaggregation decode fields survive the argv boundary."""

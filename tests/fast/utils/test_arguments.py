@@ -175,6 +175,25 @@ class TestAddArgumentsSupport:
             get_miles_extra_args_provider()(parser)
 
 
+def _write_franky_sglang_config(tmp_path: Path) -> Path:
+    config_path = tmp_path / "sglang.yaml"
+    config_path.write_text(
+        "sglang:\n"
+        "  - name: actor\n"
+        "    server_groups:\n"
+        "      - worker_type: regular\n"
+        "        num_gpus: 4\n"
+        "        overrides:\n"
+        "          franky_side: ricky\n"
+        "      - worker_type: regular\n"
+        "        num_gpus: 4\n"
+        "        overrides:\n"
+        "          model_path: /model/sandy\n"
+        "          franky_side: sandy\n"
+    )
+    return config_path
+
+
 class TestRouterFlag:
     @pytest.mark.parametrize(
         ("argv", "expected"),
@@ -209,6 +228,26 @@ class TestRouterFlag:
         path.write_text("router: unknown-router")
         with pytest.raises(ValueError, match="router"):
             parse_megatron_test_config("--custom-config-path", str(path))
+
+    def test_a_franky_sandy_group_is_refused_without_the_sgl_router(self, tmp_path: Path):
+        config_path = _write_franky_sglang_config(tmp_path)
+
+        with pytest.raises(ValueError) as exc_info:
+            parse_megatron_test_config("--sglang-config", str(config_path), "--rollout-num-gpus", "8")
+
+        assert str(exc_info.value) == (
+            "Models ['actor'] have server groups with franky_side: sandy, which only --router sgl_router pairs with "
+            "their Ricky engines; this run has --router sglang"
+        )
+
+    def test_the_sgl_router_takes_a_franky_sandy_group(self, tmp_path: Path):
+        config_path = _write_franky_sglang_config(tmp_path)
+
+        args = parse_megatron_test_config(
+            "--sglang-config", str(config_path), "--rollout-num-gpus", "8", "--router", "sgl_router"
+        )
+
+        assert [group.serves_franky_sandy for group in args.sglang.models[0].server_groups] == [False, True]
 
 
 class TestFullyAsyncDataBufferFlags:
@@ -2314,6 +2353,39 @@ class TestSessionServerV2Validation:
             miles_validate_args(args)
 
         assert str(exc_info.value) == (f"--use-session-server v2 does not support {flag}; v2 returns list[Sample]")
+
+
+class TestSessionFrankyGeneratedSpansValidation:
+    def _parse(self, extra):
+        parser = get_megatron_arg_parser()
+        return parser.parse_args(extra + ["--num-rollout", "1"] + REQUIRED_ARGS)
+
+    @pytest.mark.parametrize(
+        ("session_server", "found"),
+        [([], "False"), (["--use-session-server", "v2"], "'v2'")],
+        ids=["no-session-server", "v2"],
+    )
+    def test_spans_are_refused_unless_the_v1_session_server_runs(self, session_server, found):
+        args = self._parse([*session_server, "--session-franky-generated-spans"])
+
+        with pytest.raises(ValueError) as exc_info:
+            miles_validate_args(args)
+
+        assert str(exc_info.value) == (
+            "--session-franky-generated-spans needs the v1 session server (--use-session-server or "
+            "--use-session-server v1), the only one that sends franky_generated_spans; this run has "
+            f"--use-session-server={found}"
+        )
+
+    @pytest.mark.parametrize(
+        "session_server", [["--use-session-server"], ["--use-session-server", "v1"]], ids=["bare", "v1"]
+    )
+    def test_spans_are_accepted_with_the_v1_session_server(self, session_server):
+        args = self._parse([*session_server, "--session-franky-generated-spans"])
+
+        miles_validate_args(args)
+
+        assert args.session_franky_generated_spans is True
 
 
 class TestSessionServerScalingArguments:

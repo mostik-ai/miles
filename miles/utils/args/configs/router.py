@@ -43,6 +43,13 @@ class RouterConfig(BaseConfig):
             help="The router in front of each model's inference engines: sgl-router or Miles.",
         ),
     ] = RouterKind.SGLANG
+    sgl_router_path: A[
+        str, Arg(help="The sgl-router binary that --router sgl_router launches, by path or by name on PATH.")
+    ] = "sgl-router"
+    sgl_router_args: A[
+        str,
+        Arg(help="More flags for the sgl-router binary, as one shell-quoted string, e.g. '--franky-block-size 256'."),
+    ] = ""
     miles_router_timeout: A[float | None, Arg(help="Timeout for MilesRouter HTTP requests in seconds.")] = None
     miles_router_max_connections: A[
         int | None,

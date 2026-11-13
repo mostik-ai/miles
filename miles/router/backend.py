@@ -2,6 +2,8 @@
 
 import enum
 import logging
+import os
+import shlex
 from abc import ABC, abstractmethod
 from argparse import Namespace
 from collections.abc import Sequence
@@ -13,6 +15,7 @@ from miles.backends.sglang_utils.router_args_utils import (
     resolve_router_policies,
     router_args_to_argv,
 )
+from miles.backends.sglang_utils.sglang_api_client import WorkerType
 from miles.router.config import compute_miles_router_config
 from miles.utils.http_utils import resolve_ip
 from miles.utils.workers.argv_utils import config_to_argv
@@ -28,6 +31,7 @@ logger = logging.getLogger(__name__)
 class RouterKind(str, enum.Enum):
     SGLANG = "sglang"
     MILES = "miles"
+    SGL_ROUTER = "sgl_router"
 
 
 @dataclass(frozen=True)
@@ -133,11 +137,57 @@ class MilesRouterBackend(RouterBackend):
         return False
 
 
+class SglRouterBackend(RouterBackend):
+    """SGLang's sgl-router binary, which serves Franky pairs: each request to a Ricky engine also goes to a Sandy
+    engine, which sends Ricky the prompt's taps. Miles registers the engines over its --worker-api."""
+
+    kind = RouterKind.SGL_ROUTER
+    features = RouterFeatures(pd_disaggregation=False, routing_key_header=None)
+
+    def _launch_argv(
+        self, ctx: LaunchCommandContext, *, model_cfg: "ModelConfig", interpreter_prefix: list[str]
+    ) -> list[str]:
+        primary = ctx.self_addrs["primary"]
+        ricky_groups = [
+            group
+            for group in model_cfg.server_groups
+            if group.worker_type != WorkerType.PLACEHOLDER and not group.serves_franky_sandy
+        ]
+        served_model_name = _shared_by_ricky_groups(
+            {group.overrides.get("served_model_name", group.model_path) for group in ricky_groups},
+            model_name=model_cfg.name,
+            server_arg="served_model_name",
+        )
+        model_path = _shared_by_ricky_groups(
+            {group.model_path for group in ricky_groups}, model_name=model_cfg.name, server_arg="model_path"
+        )
+        return [
+            *(self.args.sgl_router_path, "--host", resolve_ip(primary.host), "--port", str(primary.port)),
+            *("--model-id", served_model_name, "--tokenizer-path", os.path.join(model_path, "tokenizer.json")),
+            *("--worker-api", "--request-timeout-secs", str(self.args.sglang_router_request_timeout_secs)),
+            *shlex.split(self.args.sgl_router_args),
+        ]
+
+    def _router_routes_by_key(self, model_cfg: "ModelConfig | None") -> bool:
+        return False
+
+
 _BACKEND_CLASSES: dict[RouterKind, type[RouterBackend]] = {
     RouterKind.SGLANG: SGLangRouterBackend,
     RouterKind.MILES: MilesRouterBackend,
+    RouterKind.SGL_ROUTER: SglRouterBackend,
 }
 
 
 def make_router_backend(args: Namespace) -> RouterBackend:
     return _BACKEND_CLASSES[RouterKind(args.router)](args)
+
+
+def _shared_by_ricky_groups(values: set[str], *, model_name: str, server_arg: str) -> str:
+    if len(values) != 1:
+        raise ValueError(
+            f"sgl-router needs one {server_arg} for model {model_name!r}, but its Ricky server groups have "
+            f"{sorted(values)}"
+        )
+    [value] = values
+    return value
