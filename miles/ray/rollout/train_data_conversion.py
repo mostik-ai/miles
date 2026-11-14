@@ -412,6 +412,10 @@ def _normalize_rewards_by_rollout(
         for sibling_rows, normalized_reward in zip(
             rollout_segment_groups, normalized_rollout_rewards.tolist(), strict=True
         ):
+            if args.grpo_sqrt_length_reference is not None:
+                # the loss averages each answer over its own tokens, so a token weighs 1 / sqrt(length * reference)
+                length = sum(samples[segment_index].response_length for segment_index in sibling_rows)
+                normalized_reward *= (length / args.grpo_sqrt_length_reference) ** 0.5
             for segment_index in sibling_rows:
                 normalized_rewards[segment_index] = normalized_reward
 

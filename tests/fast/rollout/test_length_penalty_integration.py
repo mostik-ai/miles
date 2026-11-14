@@ -24,6 +24,7 @@ def _args(**overrides) -> Namespace:
             "rewards_normalization": True,
             "grpo_std_normalization": False,
             "grpo_sqrt_success_normalization": False,
+            "grpo_sqrt_length_reference": None,
             "enable_sample_ownership_checker": False,
             "rollout_top_logprobs_num": 0,
             "use_dynamic_global_batch_size": False,

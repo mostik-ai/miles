@@ -1978,6 +1978,9 @@ def miles_validate_args(args):
     if args.grpo_sqrt_success_normalization:
         validate_group_reward_weighting(args, "--grpo-sqrt-success-normalization")
 
+    if args.grpo_sqrt_length_reference is not None:
+        validate_grpo_sqrt_length_reference(args)
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -2033,6 +2036,13 @@ def validate_group_reward_weighting(args, option: str) -> None:
         args.advantage_estimator in ["grpo", "gspo"] and args.rewards_normalization
     ), f"{option} needs --advantage-estimator grpo or gspo with rewards normalization"
     assert args.custom_reward_post_process_path is None, f"{option} is bypassed by --custom-reward-post-process-path"
+
+
+def validate_grpo_sqrt_length_reference(args) -> None:
+    """The scale leaves a token 1 / sqrt(length) only when the loss averages each answer over its own tokens."""
+    option = "--grpo-sqrt-length-reference"
+    validate_group_reward_weighting(args, option)
+    assert not args.calculate_per_token_loss, f"{option} needs a per-answer mean loss, not --calculate-per-token-loss"
 
 
 def validate_skip_actor_forward_only(args) -> None:
