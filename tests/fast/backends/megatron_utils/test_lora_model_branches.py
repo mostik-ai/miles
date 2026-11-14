@@ -209,6 +209,23 @@ class TestSaveLoRaBranch:
     @patch(f"{_MODEL_MODULE}.disable_forward_pre_hook")
     @patch(f"{_MODEL_MODULE}.should_disable_forward_pre_hook", return_value=False)
     @patch(f"{_MODEL_MODULE}.save_checkpoint")
+    @patch(f"{_MODEL_MODULE}.save_single_lora")
+    @patch(f"{_MODEL_MODULE}.is_lora_model", return_value=True)
+    def test_a_torch_dist_lora_run_saves_megatrons_checkpoint(
+        self, mock_is_lora, mock_save_lora, mock_save_ckpt, mock_should, mock_disable, mock_enable, mock_save_hashes
+    ):
+        from miles.backends.megatron_utils.model import save
+
+        save(make_trainer_args(lora_checkpoint_format="torch_dist"), 42, [MagicMock()], MagicMock(), MagicMock())
+
+        mock_save_ckpt.assert_called_once()
+        mock_save_lora.assert_not_called()
+
+    @patch(f"{_MODEL_MODULE}.save_model_hashes")
+    @patch(f"{_MODEL_MODULE}.enable_forward_pre_hook")
+    @patch(f"{_MODEL_MODULE}.disable_forward_pre_hook")
+    @patch(f"{_MODEL_MODULE}.should_disable_forward_pre_hook", return_value=False)
+    @patch(f"{_MODEL_MODULE}.save_checkpoint")
     @patch(f"{_MODEL_MODULE}.is_lora_model", return_value=False)
     def test_non_lora_model_calls_regular_save(
         self, mock_is_lora, mock_save_ckpt, mock_should, mock_disable, mock_enable, mock_save_hashes
