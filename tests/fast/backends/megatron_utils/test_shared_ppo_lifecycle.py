@@ -278,6 +278,30 @@ def test_compute_log_prob_replays_sampling_support_only_for_actor_scores(
     assert forward_only.call_args.kwargs["use_rollout_sampling_mask"] is expected
 
 
+def test_every_save_hands_megatron_the_same_context_for_its_save_plan(actor_module, monkeypatch):
+    worker = object.__new__(actor_module.MegatronTrainRayActor)
+    worker._config_snapshot_train_recorded = True
+    worker.args = make_trainer_args(
+        async_save=True, custom_megatron_post_save_hook_path=None, debug_rollout_only=False, save_hf=None
+    )
+    worker.role = "actor"
+    worker._heartbeat = Mock()
+    worker.model = worker.optimizer = worker.opt_param_scheduler = object()
+    worker.adapter_slots = None
+    worker._schedule_first_rollout = 0
+    worker._save_context = {}
+    save = Mock()
+    monkeypatch.setattr(actor_module, "save", save)
+    monkeypatch.setattr(actor_module, "maybe_finalize_async_save", lambda **_kwargs: None)
+    monkeypatch.setattr(actor_module, "log_checkpoint_save", Mock())
+
+    worker.save_model(6)
+    worker.save_model(16)
+
+    first, second = (call.kwargs["checkpointing_context"] for call in save.call_args_list)
+    assert first is second is worker._save_context
+
+
 def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
     worker = object.__new__(actor_module.MegatronTrainRayActor)
     worker._config_snapshot_train_recorded = True
@@ -295,6 +319,7 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
     worker.opt_param_scheduler = object()
     worker.adapter_slots = None
     worker._schedule_first_rollout = 0
+    worker._save_context = {}
     worker.wake_up = Mock()
     worker.sleep = Mock()
     save = Mock()
@@ -313,6 +338,7 @@ def test_save_model_does_not_manage_lifecycle(actor_module, monkeypatch):
         worker.model,
         worker.optimizer,
         worker.opt_param_scheduler,
+        checkpointing_context=worker._save_context,
         adapter_slots=None,
         schedule_first_rollout=0,
     )
@@ -340,6 +366,7 @@ def test_force_sync_save_overlaps_hf_export_with_async_checkpoint(actor_module, 
     worker.snapshot_publisher = object()
     worker.adapter_slots = None
     worker._schedule_first_rollout = 0
+    worker._save_context = {}
     events = []
 
     monkeypatch.setattr(actor_module, "save", lambda *_args, **_kwargs: events.append("save"))
