@@ -51,6 +51,7 @@ from miles.utils.arguments import (
     resolve_rollout_function_paths,
     supports_partial_target_weight_update,
     validate_async_off_policy_correction,
+    validate_group_first_stage_samples,
     validate_log_probs_backend_args,
     validate_miles_ext_kernels_args,
     validate_skip_actor_forward_only,
@@ -843,6 +844,7 @@ def _fully_async_candidate_args(**overrides) -> SimpleNamespace:
         over_sampling_batch_size=None,
         train_backend="megatron",
         ft_components=[],
+        group_first_stage_samples=None,
     )
     return SimpleNamespace(**(defaults | overrides))
 
@@ -886,6 +888,41 @@ def test_the_flag_still_rejects_a_different_rollout_function():
         _resolve_rollout_functions(args)
 
 
+def test_group_first_stage_samples_needs_the_fully_async_loop():
+    with pytest.raises(AssertionError, match="--group-first-stage-samples needs --fully-async"):
+        _resolve_rollout_functions(_fully_async_candidate_args(group_first_stage_samples=4))
+
+
+class TestValidateGroupFirstStageSamples:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(
+            group_first_stage_samples=4,
+            n_samples_per_prompt=8,
+            group_rm=False,
+            async_unused_samples_handler="drop",
+            sglang_enable_deterministic_inference=False,
+        )
+        return SimpleNamespace(**(defaults | overrides))
+
+    def test_a_first_stage_that_leaves_a_later_one_passes(self):
+        validate_group_first_stage_samples(self._args())
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"group_first_stage_samples": 8},
+            {"group_first_stage_samples": 0},
+            {"group_rm": True},
+            {"async_unused_samples_handler": "retry"},
+            {"sglang_enable_deterministic_inference": True},
+        ],
+    )
+    def test_refuses_arguments_that_break_the_stages(self, overrides):
+        with pytest.raises(AssertionError, match="--group-first-stage-samples"):
+            validate_group_first_stage_samples(self._args(**overrides))
+
+
 def test_an_ordinary_rollout_function_path_stays_untouched():
     args = _fully_async_candidate_args(rollout_function_path="pkg.CustomRolloutFn")
 
@@ -925,6 +962,7 @@ def _make_fully_async_args(**overrides) -> SimpleNamespace:
         over_sampling_batch_size=None,
         train_backend="megatron",
         ft_components=[],
+        group_first_stage_samples=None,
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
