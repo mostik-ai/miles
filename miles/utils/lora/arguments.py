@@ -73,6 +73,13 @@ def validate_lora_args(args):
         "torchtitan",
     ), f"LoRA injection is not implemented for --train-backend {args.train_backend}; use megatron or torchtitan"
     assert args.lora_rank > 0, "LoRA requires a positive --lora-rank, including when loading an adapter"
+    if args.lora_merged_rollout:
+        assert args.megatron_to_hf_mode == "bridge", "--lora-merged-rollout merges through Bridge's export"
+        assert not args.lora_train_only, "--lora-train-only serves the frozen base, not the merged adapter"
+        assert not args.multi_lora, "--lora-merged-rollout merges one adapter, not slots"
+        assert not args.colocate, "--lora-merged-rollout merges weights that a colocated trainer offloads"
+        # The session server attaches lora_path from its own copy of the LoRA flags, which has no merged mode.
+        assert not args.use_session_server, "--lora-merged-rollout does not support the session server"
     hf_config = load_hf_config(args.hf_checkpoint)
     args.hf_lora_targets = _resolve_lora_targets(args, hf_config)
     args.lora_adapter_targets = list(args.hf_lora_targets)
