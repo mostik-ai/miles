@@ -283,6 +283,10 @@ class AlgoRolloutOnlyConfig(BaseConfig):
             help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
         ),
     ] = True
+    grpo_sqrt_success_normalization: A[
+        bool,
+        Arg(help="Divide each group's advantages by the square root of its success rate, instead of its std."),
+    ] = False
     rewards_normalization: A[
         bool,
         Arg(

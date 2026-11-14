@@ -1975,6 +1975,9 @@ def miles_validate_args(args):
     if args.skip_zero_advantage_samples:
         validate_skip_zero_advantage_samples(args)
 
+    if args.grpo_sqrt_success_normalization:
+        validate_group_reward_weighting(args, "--grpo-sqrt-success-normalization")
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -2021,6 +2024,15 @@ def validate_skip_zero_advantage_samples(args) -> None:
         if enabled
     ]
     assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
+
+
+def validate_group_reward_weighting(args, option: str) -> None:
+    """A group-weighting option rescales the group-normalized advantages, so it needs that normalization, which a custom
+    reward post-process replaces."""
+    assert (
+        args.advantage_estimator in ["grpo", "gspo"] and args.rewards_normalization
+    ), f"{option} needs --advantage-estimator grpo or gspo with rewards normalization"
+    assert args.custom_reward_post_process_path is None, f"{option} is bypassed by --custom-reward-post-process-path"
 
 
 def validate_skip_actor_forward_only(args) -> None:
