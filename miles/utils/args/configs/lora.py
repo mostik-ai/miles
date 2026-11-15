@@ -74,6 +74,17 @@ class LoraConfig(BaseConfig):
             )
         ),
     ] = None
+    lora_checkpoint_format: A[
+        str,
+        Arg(
+            choices=["adapter", "torch_dist"],
+            help=(
+                "adapter: save the adapter shards and their optimizer state, restored through --lora-adapter-path. "
+                "torch_dist: save Megatron's own checkpoint, the frozen model and the RNG state included, which --load "
+                "restores like any other run; Bridge LoRA only, since native adapters are not in Megatron's state."
+            ),
+        ),
+    ] = "adapter"
     lora_sync_from_tensor: A[
         bool,
         Arg(help="Sync LoRA weights via tensor instead of file (more efficient)"),

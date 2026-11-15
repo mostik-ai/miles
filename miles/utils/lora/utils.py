@@ -29,11 +29,13 @@ def exports_hf_snapshots(args: Namespace) -> bool:
 
 
 def reads_adapter_slots(args: Namespace, save: str | None) -> bool:
-    """HF exports, multi-LoRA sampler exports or a single-LoRA adapter dir (save, --lora-adapter-path) read slots."""
+    """HF exports, multi-LoRA sampler exports or a single-LoRA adapter dir (an adapter-format save,
+    --lora-adapter-path) read slots."""
+    saves_adapter = save is not None and args.lora_checkpoint_format == "adapter"
     return (
         exports_hf_snapshots(args)
         or is_multi_lora_enabled(args)
-        or (is_lora_enabled(args) and (save is not None or args.lora_adapter_path is not None))
+        or (is_lora_enabled(args) and (saves_adapter or args.lora_adapter_path is not None))
     )
 
 

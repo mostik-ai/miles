@@ -79,6 +79,7 @@ _NO_SNAPSHOTS = dict(
     save=None,
     lora_rank=8,
     lora_adapter_path=None,
+    lora_checkpoint_format="adapter",
     debug_rollout_only=False,
     multi_lora=False,
     lora_adapter_targets=[],
@@ -148,6 +149,7 @@ def _single_lora_args(**overrides):
         lora_adapter_convert_save=None,
         train_backend="megatron",
         megatron_to_hf_mode="bridge",
+        lora_checkpoint_format="adapter",
         indep_dp=False,
         debug_rollout_only=False,
         debug_skip_weight_update=False,
@@ -169,6 +171,7 @@ def test_a_relative_adapter_path_is_made_absolute_before_alpha_is_resolved(tmp_p
 def test_rollout_only_skips_the_adapter_checkpoint_checks():
     args = Namespace(
         lora_rank=8,
+        lora_checkpoint_format="adapter",
         lora_adapter_path="/adapter",
         save=None,
         multi_lora=False,
@@ -184,6 +187,7 @@ def test_lora_refuses_a_load_holding_adapter_checkpoints_without_an_adapter_path
     (tmp_path / "iter_0000003" / "adapter").mkdir(parents=True)
     args = Namespace(
         lora_rank=8,
+        lora_checkpoint_format="adapter",
         multi_lora=False,
         megatron_to_hf_mode="raw",
         debug_rollout_only=False,
@@ -194,6 +198,29 @@ def test_lora_refuses_a_load_holding_adapter_checkpoints_without_an_adapter_path
     )
     with pytest.raises(AssertionError, match=r"holds LoRA adapter checkpoints \(iter_\*/adapter\)"):
         validate_lora_args_after_megatron(args)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"megatron_to_hf_mode": "raw"}, "--megatron-to-hf-mode bridge"),
+        ({"multi_lora": True}, "one adapter"),
+        ({"ckpt_format": "torch"}, "--ckpt-format torch_dist"),
+    ],
+)
+def test_a_torch_dist_lora_checkpoint_refuses_what_megatron_would_not_save_whole(overrides, message):
+    args = dict(lora_rank=8, lora_checkpoint_format="torch_dist", megatron_to_hf_mode="bridge", multi_lora=False)
+    with pytest.raises(AssertionError, match=message):
+        validate_lora_args_after_megatron(Namespace(**(args | {"ckpt_format": "torch_dist"} | overrides)))
+
+
+def test_a_torch_dist_lora_checkpoint_needs_the_megatron_backend():
+    with pytest.raises(AssertionError, match="needs --train-backend megatron"):
+        validate_lora_args(_single_lora_args(train_backend="torchtitan", lora_checkpoint_format="torch_dist"))
+
+
+def test_a_torch_dist_save_checks_no_adapter_state():
+    _validate_adapter_state_args(Namespace(save="/save", lora_checkpoint_format="torch_dist", lora_adapter_path=None))
 
 
 def test_without_an_optimizer_an_adapter_path_loads_weights_only():
@@ -283,6 +310,7 @@ def _bridge_args_without_layout(monkeypatch, *, multi_lora=False, **overrides):
         lora_rank=8,
         lora_alpha=16.0,
         lora_adapter_path=None,
+        lora_checkpoint_format="adapter",
         lora_type="lora",
         experts_shared_outer_loras=False,
         lora_adapter_convert_save=None,
@@ -307,6 +335,8 @@ def test_only_runs_that_read_the_adapter_slots_need_the_hf_lora_layout(monkeypat
     """The adapter slots, which need the layout, are built for HF snapshot exports and the --save adapter dir."""
     monkeypatch.setattr(lora_arguments, "_validate_adapter_state_args", lambda args: None)
     _validate(_bridge_args_without_layout(monkeypatch))
+    torch_dist_save = dict(save="/save", lora_checkpoint_format="torch_dist", ckpt_format="torch_dist")
+    _validate(_bridge_args_without_layout(monkeypatch, **torch_dist_save))
     for reader in (dict(save_hf="/hf_out"), dict(save="/save")):
         with pytest.raises(AssertionError, match="HF LoRA target layout"):
             _validate(_bridge_args_without_layout(monkeypatch, **reader))
