@@ -14,6 +14,7 @@ from miles.backends.training_utils.checkpoint.adapter.readers import (
     classify_adapter_source,
     read_source_lora_alpha,
 )
+from miles.backends.training_utils.checkpoint.tracker import tracked_lora_adapter_dir
 from miles.utils.hf_utils.config import load_hf_config
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
 from miles.utils.lora.hf_lora_targets import (
@@ -194,10 +195,14 @@ def validate_lora_args_after_megatron(args):
             "cell would lose the adapter; remove 'train' from --ft-components and resume from a saved iter_N/adapter "
             "with --lora-adapter-path"
         )
-        # without --lora-adapter-path the run would start from the base model and overwrite those adapters
-        assert args.lora_adapter_path is not None or not (args.load and any(Path(args.load).glob("iter_*/adapter"))), (
-            f"--load {args.load} holds LoRA adapter checkpoints (iter_*/adapter): resume one with "
-            "--lora-adapter-path, or point --load elsewhere"
+        # an adapter the tracker names is continued; any other would be overwritten by a run started from the base
+        assert (
+            args.lora_adapter_path is not None
+            or tracked_lora_adapter_dir(args.load) is not None
+            or not (args.load and any(Path(args.load).glob("iter_*/adapter")))
+        ), (
+            f"--load {args.load} holds LoRA adapter checkpoints (iter_*/adapter) but its tracker names none of them: "
+            "resume one with --lora-adapter-path, or point --load elsewhere"
         )
         # rollout-only builds no optimizer and saves nothing
         _validate_adapter_state_args(args)

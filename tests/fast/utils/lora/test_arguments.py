@@ -196,6 +196,38 @@ def test_lora_refuses_a_load_holding_adapter_checkpoints_without_an_adapter_path
         validate_lora_args_after_megatron(args)
 
 
+def _continued_lora_args(load):
+    return Namespace(
+        lora_rank=8,
+        multi_lora=False,
+        megatron_to_hf_mode="bridge",
+        debug_rollout_only=False,
+        indep_dp=False,
+        non_persistent_ckpt_type=None,
+        load=str(load),
+        lora_adapter_path=None,
+        save=None,
+        save_hf=None,
+        eval_uses_snapshots=False,
+        eval_hf_dir=None,
+    )
+
+
+def test_lora_continues_from_the_adapter_checkpoint_its_tracker_names(tmp_path):
+    """A run restarted on its own --load restores the tracked adapter, so nothing is overwritten."""
+    (tmp_path / "iter_0000003" / "adapter").mkdir(parents=True)
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("3")
+    validate_lora_args_after_megatron(_continued_lora_args(tmp_path))
+
+
+def test_lora_refuses_adapter_checkpoints_when_its_tracker_names_another_iteration(tmp_path):
+    """The tracked iteration holds no adapter, so the run would start from the base and overwrite iter_0000003."""
+    (tmp_path / "iter_0000003" / "adapter").mkdir(parents=True)
+    (tmp_path / "latest_checkpointed_iteration.txt").write_text("5")
+    with pytest.raises(AssertionError, match="but its tracker names none of them"):
+        validate_lora_args_after_megatron(_continued_lora_args(tmp_path))
+
+
 def test_without_an_optimizer_an_adapter_path_loads_weights_only():
     args = Namespace(
         save=None, lora_adapter_path="/adapter", lora_adapter_convert_save=None, debug_disable_optimizer=True
