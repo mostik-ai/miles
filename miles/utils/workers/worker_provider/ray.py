@@ -39,6 +39,10 @@ class RayWorkerProvider(BaseWorkerProvider):
     async def get_addrs(self, worker_name: str) -> NamedHostAndPorts:
         return await self._worker_manager_handle.get_worker_addrs.remote(worker_name)
 
+    async def cell_has_workers(self, cell_id: str) -> bool:
+        # The worker manager tears a whole cell down when any of its workers dies.
+        return bool(await self._worker_manager_handle.get_worker_infos.remote(cell_id))
+
     def get_handles_of_worker_infos(self, infos: list[WorkerInfo]) -> dict[str, BaseWorkerHandle]:
         actor_handles = self._get_actor_handles([info for info in infos if info.worker_class is None])
         return {

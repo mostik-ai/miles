@@ -4,7 +4,7 @@ import httpx
 import pytest
 
 from miles.utils.workers import launch_gate
-from miles.utils.workers.launch_gate import activate_launch_gate
+from miles.utils.workers.launch_gate import LaunchGateWorkerGone, activate_launch_gate
 
 
 class _StubResponse:
@@ -92,6 +92,29 @@ class TestActivateLaunchGate:
 
         with pytest.raises(httpx.ConnectError):
             await activate_launch_gate(gate_url="http://10.0.0.1:13000", timeout=0.0)
+
+    async def test_it_stops_at_once_when_the_worker_behind_the_gate_is_gone(self, stub_http):
+        """An engine that died before its gate never listens on it, so waiting out the deadline only idles its GPUs."""
+        client = stub_http([httpx.ConnectError("refused")] * 1000)
+
+        async def _gone() -> bool:
+            return False
+
+        with pytest.raises(LaunchGateWorkerGone, match="10.0.0.1:13000"):
+            await activate_launch_gate(gate_url="http://10.0.0.1:13000", worker_alive=_gone)
+
+        assert len(client.posted_urls) == 1
+
+    async def test_it_keeps_waiting_while_the_worker_behind_the_gate_lives(self, stub_http):
+        """A live engine that is still loading must be waited for, not failed."""
+        client = stub_http([httpx.ConnectError("refused"), httpx.ConnectError("refused"), _StubResponse()])
+
+        async def _alive() -> bool:
+            return True
+
+        await activate_launch_gate(gate_url="http://10.0.0.1:13000", worker_alive=_alive)
+
+        assert len(client.posted_urls) == 3
 
     async def test_it_stops_posting_once_the_gate_accepts(self, stub_http):
         """Activation is a one-shot release; repeating it would be pointless traffic."""

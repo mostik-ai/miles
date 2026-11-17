@@ -175,7 +175,9 @@ class ServerCell:
         assert isinstance(self._state, StateUninitialized), f"{self._state=}"
         addr_info = await self._compute_addr_info()
         if (gate_url := addr_info.gate_url) is not None:
-            await activate_launch_gate(gate_url=gate_url)
+            await activate_launch_gate(
+                gate_url=gate_url, worker_alive=lambda: self.provider.cell_has_workers(self.meta.cell_id)
+            )
         self._change_state(
             "init", StateUninitialized, StateInitializing(addr_info=addr_info, start_time=time.monotonic())
         )

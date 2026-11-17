@@ -65,7 +65,7 @@ def _make_cell(*, global_activeness=None, router=None, **meta_overrides) -> Serv
 
 
 def _stub_network(monkeypatch, *, ready: bool = True) -> None:
-    async def _activate(gate_url: str) -> None:
+    async def _activate(gate_url: str, worker_alive=None) -> None:
         pass
 
     async def _probe(server_url: str, api_key, timeout: float = 5.0) -> bool:

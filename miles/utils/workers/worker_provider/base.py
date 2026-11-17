@@ -40,6 +40,10 @@ class BaseWorkerProvider(abc.ABC):
     def expected_num_cells(self, *, group_id: str) -> int | None:
         return None
 
+    async def cell_has_workers(self, cell_id: str) -> bool:
+        """False once the cell's workers are gone; a provider that does not observe workers answers True."""
+        return True
+
     def get_handle(self, worker_name: str) -> BaseWorkerHandle:
         (infos,) = self.get_worker_infos(cell_ids=[cell_id_of_worker(worker_name)])
         handles = self.get_handles_of_worker_infos(infos)

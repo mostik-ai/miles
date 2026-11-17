@@ -4,6 +4,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from tests.fast.ray.rollout.conftest import make_args, track_server_cell
 
@@ -20,6 +21,7 @@ from miles.ray.rollout.cell_state import (
 )
 from miles.ray.rollout.server_cell import ServerCell, ServerCellMetadata
 from miles.utils import retry_utils
+from miles.utils.workers import launch_gate
 from miles.utils.workers.worker_spec import HostAndPort
 
 pytestmark = pytest.mark.usefixtures("dispose_tracked_server_cells")
@@ -129,7 +131,7 @@ def cell_env(monkeypatch):
     activated: list[str] = []
     health: dict[str, bool] = {"ready": True}
 
-    async def _activate(gate_url: str) -> None:
+    async def _activate(gate_url: str, worker_alive=None) -> None:
         activated.append(gate_url)
 
     async def _compute_addr_info(self) -> CellAddrInfo:
@@ -231,7 +233,7 @@ class TestInit:
         """Recording the transition before the gate opens would leave the engine waiting forever."""
         attempts = {"count": 0}
 
-        async def _flaky_activate(gate_url: str) -> None:
+        async def _flaky_activate(gate_url: str, worker_alive=None) -> None:
             attempts["count"] += 1
             if attempts["count"] == 1:
                 raise RuntimeError("gate refused the activation")
@@ -248,6 +250,35 @@ class TestInit:
 
         assert isinstance(cell._state, StateInitializing)
         assert cell_env["activated"] == ["http://10.0.0.1:13000"]
+
+    async def test_an_engine_that_died_before_its_gate_fails_init_at_once(self, monkeypatch):
+        """The cell asks its provider whether its workers live; without that, init idles out the gate's whole timeout."""
+        asked: list[str] = []
+
+        class _DeadEngineProvider(_StubProvider):
+            async def cell_has_workers(self, cell_id: str) -> bool:
+                asked.append(cell_id)
+                return False
+
+        class _RefusingClient:
+            async def post(self, url: str, json: dict, timeout: float):
+                raise httpx.ConnectError("refused")
+
+        monkeypatch.setattr(launch_gate.GeneralHttpClientProvider, "client", staticmethod(lambda: _RefusingClient()))
+        cell = track_server_cell(
+            ServerCell(
+                args=make_args(),
+                meta=_make_meta(),
+                router_api_client=_RecordingRouterApiClient(),
+                provider=_DeadEngineProvider(),
+            )
+        )
+
+        with pytest.raises(launch_gate.LaunchGateWorkerGone):
+            await asyncio.wait_for(cell.init(), timeout=10.0)
+
+        assert asked == ["inference-engine-0-0-0"]
+        assert cell.is_uninitialized
 
     async def test_a_cell_without_a_gate_port_skips_activation(self, cell_env, monkeypatch):
         """External engines run no launch-gate wrapper, so init must not dial one."""

@@ -248,14 +248,15 @@ class _ManagerHandleShim:
 
     def __init__(self, manager: RayWorkerManager) -> None:
         self.get_cell_infos = _ShimMethod(manager.get_cell_infos)
+        self.get_worker_infos = _ShimMethod(manager.get_worker_infos)
 
 
 class _ShimMethod:
     def __init__(self, fn) -> None:
         self._fn = fn
 
-    def remote(self, **kwargs):
-        return _resolved(self._fn(**kwargs))
+    def remote(self, *args, **kwargs):
+        return _resolved(self._fn(*args, **kwargs))
 
 
 async def _resolved(value):
@@ -290,6 +291,18 @@ class TestTheDeathReachesTheProvider:
             await stop()
 
         assert [cell_id for cell_id, _ in reconciler.calls] == ["engine-00000", "engine-00000"]
+
+    async def test_a_cell_whose_worker_died_has_no_workers_to_wait_for(self, fake_ray_cluster: FakeRayCluster):
+        """A launch gate stops waiting on this answer; an engine that died before its gate never opens it."""
+        manager = await _launch([_make_spec("engine", num_cells=2)], comm_backend=WorkerCommBackend.RPC)
+        provider = RayWorkerProvider(worker_manager_handle=_ManagerHandleShim(manager), pool_ids=["engine"])
+        assert await provider.cell_has_workers("engine-00000")
+
+        _kill_worker_process(fake_ray_cluster, handle_index=0)
+        await _scan_all_live_cells(manager)
+
+        assert not await provider.cell_has_workers("engine-00000")
+        assert await provider.cell_has_workers("engine-00001")
 
     async def test_the_rebuilt_cell_is_reconciled_back_with_a_new_hash(self, fake_ray_cluster: FakeRayCluster):
         """A cell dropped by the scan must be startable again and look new, or nothing reconnects to it."""
