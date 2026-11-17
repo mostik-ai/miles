@@ -1415,6 +1415,22 @@ class TestSkipZeroAdvantageSamples:
         for shard in shards:
             assert [len(tokens) for tokens in shard["tokens"]] == [lengths[i] for i in shard["sample_indices"]]
 
+    def test_each_sample_kept_carries_its_own_train_metadata(self):
+        args = make_args(
+            skip_zero_advantage_samples=True, global_batch_size=4, use_dynamic_batch_size=True, max_tokens_per_gpu=100
+        )
+        data = _make_split_data(4, lengths=[10, 20, 30, 40])
+        data["rewards"] = [1.0, 0.0, -1.0, 0.0]
+        data["raw_reward"] = list(data["rewards"])
+        data["metadata"] = [{"sandy_prompt_ids": [index]} for index in range(4)]
+        config = make_train_parallel_config(dp_size=2, supports_precomputed_schedule=True)
+
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=config)
+
+        assert _trained(shards) == [0, 2]
+        for shard in shards:
+            assert [entry["sandy_prompt_ids"] for entry in shard["metadata"]] == [[i] for i in shard["sample_indices"]]
+
     def test_a_batch_off_the_rollout_side_schedule_is_refused(self):
         args = make_args(skip_zero_advantage_samples=True)
         config = make_train_parallel_config(dp_size=2, supports_precomputed_schedule=False)
