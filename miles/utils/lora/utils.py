@@ -29,21 +29,29 @@ def exports_hf_snapshots(args: Namespace) -> bool:
 
 
 def reads_adapter_slots(args: Namespace, save: str | None) -> bool:
-    """HF exports, multi-LoRA sampler exports or a single-LoRA adapter dir (save, --lora-adapter-path) read slots."""
+    """HF exports, multi-LoRA sampler exports or a single-LoRA adapter dir (an adapter-format save,
+    --lora-adapter-path) read slots."""
+    saves_adapter = save is not None and args.lora_checkpoint_format == "adapter"
     return (
         exports_hf_snapshots(args)
         or is_multi_lora_enabled(args)
-        or (is_lora_enabled(args) and (save is not None or args.lora_adapter_path is not None))
+        or (is_lora_enabled(args) and (saves_adapter or args.lora_adapter_path is not None))
     )
 
 
 def lora_rollout_enabled(args: Namespace) -> bool:
-    """LoRA enabled AND the rollout side participates; false under --lora-train-only.
+    """LoRA enabled AND the rollout side serves the adapter; false under --lora-train-only (the frozen base is
+    served) and --lora-merged-rollout (the merged weights are synced and served like a full fine-tune's).
 
     Gates everything rollout-facing: SGLang's ``enable_lora``, the per-request
     ``lora_path``, and the adapter weight sync. Training-side LoRA is unaffected.
     """
-    return is_lora_enabled(args) and not args.lora_train_only
+    return (
+        is_lora_enabled(args)
+        and not args.lora_train_only
+        # config-access-exempt: the session server's own config has no merged mode, which it refuses
+        and not getattr(args, "lora_merged_rollout", False)
+    )
 
 
 def engine_loads_adapter_from_disk(args: Namespace) -> bool:

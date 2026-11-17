@@ -162,6 +162,10 @@ def _resolve_rollout_functions(args) -> None:
                 "continuously and each step drains --rollout-batch-size of them. "
                 "Use --async-max-concurrent-samples to control how many samples are in flight."
             )
+        if args.group_first_stage_samples is not None:
+            validate_group_first_stage_samples(args)
+    else:
+        assert args.group_first_stage_samples is None, "--group-first-stage-samples needs --fully-async"
 
     user_eval_path = args.eval_function_path
     resolve_rollout_function_paths(args)
@@ -176,6 +180,15 @@ def _resolve_rollout_functions(args) -> None:
         args.eval_num_gpus > 0 and _compute_rollout_external(args)
     ), "eval_num_gpus cannot be set with external rollout engines."
     args.eval_uses_snapshots = args.eval_num_gpus > 0 or checkpoint_backend
+
+
+def validate_group_first_stage_samples(args) -> None:
+    option = "--group-first-stage-samples"
+    assert 1 <= args.group_first_stage_samples < args.n_samples_per_prompt, f"{option} must leave a later stage"
+    assert not args.group_rm, f"{option} reads each reward as its sample finishes"
+    assert (
+        args.async_unused_samples_handler == "drop"
+    ), f"{option} needs the drop handler: the retry handler would regenerate an abandoned prompt at once"
 
 
 def _add_miles_ext_kernels_arguments(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -413,6 +426,7 @@ def parse_args_and_get_parser(
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
     _check_stop_token_replace_streaming_session(args, sglang=sglang)
+    _check_group_first_stage_seeds(args, sglang=sglang)
     _check_multimodal_token_space_processing_args(args, sglang=sglang)
     _check_router_serves_franky_sandy_groups(args, sglang=sglang)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
@@ -1047,6 +1061,11 @@ def _check_router_serves_franky_sandy_groups(args: argparse.Namespace, *, sglang
             f"Models {sandy_model_names} have server groups with franky_side: sandy, which only --router sgl_router "
             f"pairs with their Ricky engines; this run has --router {router.value}"
         )
+
+
+def _check_group_first_stage_seeds(args: argparse.Namespace, *, sglang: SglangConfig) -> None:
+    if args.group_first_stage_samples is not None and sglang.common_value("enable_deterministic_inference"):
+        raise ValueError("--group-first-stage-samples: a later stage would repeat the first stage's seeds")
 
 
 def _apply_custom_config(args, data: dict) -> None:
@@ -1978,6 +1997,15 @@ def miles_validate_args(args):
     if args.skip_actor_forward_only:
         validate_skip_actor_forward_only(args)
 
+    if args.skip_zero_advantage_samples:
+        validate_skip_zero_advantage_samples(args)
+
+    if args.grpo_sqrt_success_normalization:
+        validate_grpo_sqrt_success_normalization(args)
+
+    if args.grpo_sqrt_length_reference is not None:
+        validate_grpo_sqrt_length_reference(args)
+
     validate_score_centering_args(args)
 
     _maybe_apply_dumper_overrides(args)
@@ -1989,6 +2017,69 @@ def miles_validate_args(args):
         raise ValueError("--mini-ft-controller-enable requires --api-server-port to be set (non-zero)")
 
     _validate_deploy_component(args)
+
+
+def validate_skip_zero_advantage_samples(args) -> None:
+    """A sample with a zero advantage adds nothing to the update only if the policy gradient alone reads it. Beyond what
+    --skip-actor-forward-only refuses, which covers random draws and routing that read a whole micro-batch, refuses every
+    other term and normalization that would read a skipped sample, and every mode that builds no rollout-side
+    schedule."""
+    option = "--skip-zero-advantage-samples"
+    assert args.skip_actor_forward_only, f"{option} requires --skip-actor-forward-only"
+    assert args.advantage_estimator == "grpo", f"{option} only supports --advantage-estimator grpo"
+    assert args.use_dynamic_batch_size, f"{option} requires --use-dynamic-batch-size"
+
+    incompatible_options = [
+        name
+        for name, enabled in (
+            ("--entropy-coef", args.entropy_coef != 0),
+            ("--use-kl-loss", args.use_kl_loss),
+            ("--normalize-advantages", args.normalize_advantages),
+            ("--calculate-per-token-loss", args.calculate_per_token_loss),
+            ("--custom-pg-loss-reducer-function-path", args.custom_pg_loss_reducer_function_path is not None),
+            ("--custom-tis-function-path", args.custom_tis_function_path is not None),
+            ("--rollout-data-postprocess-path", args.rollout_data_postprocess_path is not None),
+            ("--enable-mtp-training", args.enable_mtp_training),
+            ("--moe-aux-loss-coeff", args.moe_aux_loss_coeff not in (None, 0, [0])),
+            ("--moe-z-loss-coeff", args.moe_z_loss_coeff not in (None, 0, [0])),
+            ("--moe-expert-capacity-factor", args.moe_expert_capacity_factor is not None),
+            ("--moe-router-enable-expert-bias", args.moe_router_enable_expert_bias),
+            ("--enable-sample-ownership-checker", args.enable_sample_ownership_checker),
+            ("--delay-split-train-data-by-dp", args.delay_split_train_data_by_dp),
+            ("--indep-dp", args.indep_dp),
+            ("--multi-lora-n-adapters", args.multi_lora_n_adapters > 0),
+        )
+        if enabled
+    ]
+    assert not incompatible_options, f"{option} is incompatible with: {', '.join(incompatible_options)}"
+
+
+def validate_group_reward_weighting(args, option: str) -> None:
+    """A group-weighting option rescales the group-normalized advantages, so it needs that normalization, which a custom
+    reward post-process replaces."""
+    assert (
+        args.advantage_estimator in ["grpo", "gspo"] and args.rewards_normalization
+    ), f"{option} needs --advantage-estimator grpo or gspo with rewards normalization"
+    assert args.custom_reward_post_process_path is None, f"{option} is bypassed by --custom-reward-post-process-path"
+
+
+def validate_grpo_sqrt_success_normalization(args) -> None:
+    """The scale reads a group's success rate as its mean reward, which a length penalty would lower."""
+    option = "--grpo-sqrt-success-normalization"
+    validate_group_reward_weighting(args, option)
+    assert (
+        args.length_penalty_coeff == 0
+    ), f"{option} reads the success rate as the mean reward; drop --length-penalty-coeff"
+
+
+def validate_grpo_sqrt_length_reference(args) -> None:
+    """The scale leaves a token 1 / sqrt(length) only when the loss averages each answer over its own tokens."""
+    option = "--grpo-sqrt-length-reference"
+    validate_group_reward_weighting(args, option)
+    assert not args.calculate_per_token_loss and args.custom_pg_loss_reducer_function_path is None, (
+        f"{option} needs the per-answer mean loss, which --calculate-per-token-loss and "
+        "--custom-pg-loss-reducer-function-path replace"
+    )
 
 
 def validate_skip_actor_forward_only(args) -> None:

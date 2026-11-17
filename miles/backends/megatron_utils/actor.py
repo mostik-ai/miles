@@ -87,6 +87,7 @@ from ...utils.profile_utils import TrainProfiler
 from ...utils.tensor_backper import TensorBackuper
 from ..training_utils.parallel import get_parallel_state
 from .checkpoint import load_checkpoint
+from .flash_attn_4_ulysses import patch_flash_attn_4_ulysses
 from .ft.checkpoint_transfer import recv_ckpt
 from .ft.checkpoint_transfer import send_ckpt as _send_ckpt
 from .ft.in_memory_checkpoint import InMemoryCheckpointManager
@@ -105,6 +106,7 @@ from .named_weights import named_params_and_buffers
 from .optimizer_utils import reset_optimizer_state
 from .parallel import verify_megatron_parallel_state
 from .replay_utils import register_replay_list_moe
+from .te_a2a_reorder import patch_te_a2a_reorder
 
 logging.getLogger("megatron").setLevel(logging.WARNING)
 
@@ -156,6 +158,9 @@ class MegatronTrainRayActor(TrainRayActor):
         self.snapshot_publisher: SnapshotPublisher | None = None
         self.adapter_slots: BridgeAdapterSlots | NativeAdapterSlots | None = None
         monkey_patch_torch_dist()
+        patch_flash_attn_4_ulysses()
+        if args.reorder_ulysses_chunks_on_host:
+            patch_te_a2a_reorder()
 
         self._last_rollout_id: int | None = None
         self._cell_index = indep_dp_info.cell_index
@@ -255,6 +260,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         self._asleep = False
         self._grad_buffer_paused = False
+        self._save_context: dict = {}  # holds Megatron's save plan between saves
 
         if role == "critic":
             with ckpt_load_config.apply(args.backend):
@@ -500,11 +506,11 @@ class MegatronTrainRayActor(TrainRayActor):
             if self.args.update_weights_interval == 1:
                 self.weights_backuper.backup("rollout_actor")
 
-    def _finalize_pending_async_save(self) -> None:
+    def _finalize_pending_async_save(self, blocking: bool = True) -> None:
         if not self.args.backend.async_save:
             return
 
-        maybe_finalize_async_save(blocking=True)
+        maybe_finalize_async_save(blocking=blocking)
 
     @with_logs
     @timer
@@ -679,6 +685,9 @@ class MegatronTrainRayActor(TrainRayActor):
         self._last_rollout_id = rollout_id
         if self.args.offload_train and self._asleep:
             self.wake_up()
+        # a background save becomes the checkpoint a resume loads only once finalized; left to the next save, a lost
+        # node would resume a whole save interval further back
+        self._finalize_pending_async_save(blocking=False)
 
         with ExitStack() as stack:
             with timer("data_preprocess"):
@@ -966,6 +975,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.model,
             self.optimizer,
             self.opt_param_scheduler,
+            checkpointing_context=self._save_context,
             adapter_slots=self.adapter_slots,
             schedule_first_rollout=self._schedule_first_rollout,
         )

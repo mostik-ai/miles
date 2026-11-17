@@ -32,6 +32,7 @@ from miles.utils.args.trainer_utils import compute_trainer_ckpt_load_config
 from miles.utils.arguments import (
     CAKE_BACKEND_ARGS,
     FULLY_ASYNC_ROLLOUT_PATH,
+    _check_group_first_stage_seeds,
     _check_multimodal_token_space_processing_args,
     _check_stop_token_replace_streaming_session,
     _compute_custom_inference_engine_provider_path,
@@ -51,9 +52,14 @@ from miles.utils.arguments import (
     resolve_rollout_function_paths,
     supports_partial_target_weight_update,
     validate_async_off_policy_correction,
+    validate_group_first_stage_samples,
+    validate_group_reward_weighting,
+    validate_grpo_sqrt_length_reference,
+    validate_grpo_sqrt_success_normalization,
     validate_log_probs_backend_args,
     validate_miles_ext_kernels_args,
     validate_skip_actor_forward_only,
+    validate_skip_zero_advantage_samples,
 )
 from miles.utils.env_report.redaction import _SECRET_ARG_NAMES, _SECRET_ENV_VAR_PATTERN
 from miles.utils.ft_utils.health_checker import SimpleHealthCheckerConfig
@@ -881,6 +887,7 @@ def _fully_async_candidate_args(**overrides) -> SimpleNamespace:
         over_sampling_batch_size=None,
         train_backend="megatron",
         ft_components=[],
+        group_first_stage_samples=None,
     )
     return SimpleNamespace(**(defaults | overrides))
 
@@ -924,6 +931,51 @@ def test_the_flag_still_rejects_a_different_rollout_function():
         _resolve_rollout_functions(args)
 
 
+def test_group_first_stage_samples_needs_the_fully_async_loop():
+    with pytest.raises(AssertionError, match="--group-first-stage-samples needs --fully-async"):
+        _resolve_rollout_functions(_fully_async_candidate_args(group_first_stage_samples=4))
+
+
+class TestValidateGroupFirstStageSamples:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(
+            group_first_stage_samples=4,
+            n_samples_per_prompt=8,
+            group_rm=False,
+            async_unused_samples_handler="drop",
+        )
+        return SimpleNamespace(**(defaults | overrides))
+
+    def test_a_first_stage_that_leaves_a_later_one_passes(self):
+        validate_group_first_stage_samples(self._args())
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"group_first_stage_samples": 8},
+            {"group_first_stage_samples": 0},
+            {"group_rm": True},
+            {"async_unused_samples_handler": "retry"},
+        ],
+    )
+    def test_refuses_arguments_that_break_the_stages(self, overrides):
+        with pytest.raises(AssertionError, match="--group-first-stage-samples"):
+            validate_group_first_stage_samples(self._args(**overrides))
+
+    def test_deterministic_inference_from_a_server_group_would_repeat_the_first_stage_seeds(self):
+        group = ServerGroupConfig(
+            worker_type=WorkerType.REGULAR,
+            num_gpus_per_engine=1,
+            overrides={"enable_deterministic_inference": True},
+            needs_offload=False,
+        )
+        model = ModelConfig(name="default", model_path=None, server_groups=[group], update_weights=True)
+        sglang = SglangConfig(models=[model], base_args={"enable_deterministic_inference": False})
+        with pytest.raises(ValueError, match="repeat the first stage's seeds"):
+            _check_group_first_stage_seeds(argparse.Namespace(group_first_stage_samples=4), sglang=sglang)
+
+
 def test_an_ordinary_rollout_function_path_stays_untouched():
     args = _fully_async_candidate_args(rollout_function_path="pkg.CustomRolloutFn")
 
@@ -963,6 +1015,7 @@ def _make_fully_async_args(**overrides) -> SimpleNamespace:
         over_sampling_batch_size=None,
         train_backend="megatron",
         ft_components=[],
+        group_first_stage_samples=None,
     )
     return SimpleNamespace(**{**defaults, **overrides})
 
@@ -4570,3 +4623,103 @@ class TestMultimodalTokenSpaceProcessingArgs:
             _check_multimodal_token_space_processing_args(
                 args, sglang=SglangConfig(models=[actor], base_args=self._SUPPORTED)
             )
+
+
+def _make_skip_zero_advantage_args(**overrides) -> SimpleNamespace:
+    defaults = dict(
+        skip_actor_forward_only=True,
+        advantage_estimator="grpo",
+        use_dynamic_batch_size=True,
+        entropy_coef=0.0,
+        use_kl_loss=False,
+        normalize_advantages=False,
+        calculate_per_token_loss=False,
+        custom_pg_loss_reducer_function_path=None,
+        custom_tis_function_path=None,
+        rollout_data_postprocess_path=None,
+        enable_mtp_training=False,
+        moe_aux_loss_coeff=[0.0],
+        moe_z_loss_coeff=None,
+        moe_expert_capacity_factor=None,
+        moe_router_enable_expert_bias=False,
+        enable_sample_ownership_checker=False,
+        delay_split_train_data_by_dp=False,
+        indep_dp=False,
+        multi_lora_n_adapters=0,
+    )
+    return SimpleNamespace(**{**defaults, **overrides})
+
+
+class TestValidateSkipZeroAdvantageSamples:
+    def test_a_policy_gradient_alone_passes(self):
+        validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args())
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [{"entropy_coef": 0.01}, {"moe_aux_loss_coeff": [0.01]}, {"use_dynamic_batch_size": False}],
+    )
+    def test_what_else_reads_a_skipped_sample_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--skip-zero-advantage-samples"):
+            validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args(**overrides))
+
+    @pytest.mark.parametrize("overrides", [{"indep_dp": True}, {"multi_lora_n_adapters": 2}])
+    def test_a_mode_without_the_rollout_side_schedule_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--skip-zero-advantage-samples is incompatible"):
+            validate_skip_zero_advantage_samples(_make_skip_zero_advantage_args(**overrides))
+
+
+class TestValidateGroupRewardWeighting:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(advantage_estimator="grpo", rewards_normalization=True, custom_reward_post_process_path=None)
+        return SimpleNamespace(**(defaults | overrides))
+
+    @pytest.mark.parametrize("estimator", ["grpo", "gspo"])
+    def test_a_group_normalized_run_passes(self, estimator):
+        validate_group_reward_weighting(self._args(advantage_estimator=estimator), "--option")
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"advantage_estimator": "reinforce_plus_plus_baseline"},
+            {"rewards_normalization": False},
+            {"custom_reward_post_process_path": "pkg.post_process"},
+        ],
+    )
+    def test_a_run_that_would_ignore_the_option_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--option"):
+            validate_group_reward_weighting(self._args(**overrides), "--option")
+
+
+def test_the_root_of_the_success_rate_refuses_a_length_penalty_which_lowers_the_mean_reward():
+    args = SimpleNamespace(
+        advantage_estimator="grpo",
+        rewards_normalization=True,
+        custom_reward_post_process_path=None,
+        length_penalty_coeff=0.5,
+    )
+    with pytest.raises(AssertionError, match="--length-penalty-coeff"):
+        validate_grpo_sqrt_success_normalization(args)
+
+
+class TestValidateGrpoSqrtLengthReference:
+    @staticmethod
+    def _args(**overrides) -> SimpleNamespace:
+        defaults = dict(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            custom_reward_post_process_path=None,
+            calculate_per_token_loss=False,
+            custom_pg_loss_reducer_function_path=None,
+        )
+        return SimpleNamespace(**(defaults | overrides))
+
+    def test_a_group_normalized_per_answer_mean_passes(self):
+        validate_grpo_sqrt_length_reference(self._args())
+
+    @pytest.mark.parametrize(
+        "overrides", [{"calculate_per_token_loss": True}, {"custom_pg_loss_reducer_function_path": "pkg.reducer"}]
+    )
+    def test_a_loss_that_is_not_the_per_answer_mean_is_refused(self, overrides):
+        with pytest.raises(AssertionError, match="--grpo-sqrt-length-reference"):
+            validate_grpo_sqrt_length_reference(self._args(**overrides))

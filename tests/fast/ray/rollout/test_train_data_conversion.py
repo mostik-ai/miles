@@ -16,6 +16,7 @@ from miles.ray.rollout.train_data_conversion import (
     _post_process_rewards,
     can_precompute_dp_schedule,
     convert_samples_to_train_data,
+    process_rollout_data_shard,
     split_train_data_by_dp,
     split_train_data_by_dp_raw,
     split_train_data_by_dp_scheduled_raw,
@@ -23,6 +24,7 @@ from miles.ray.rollout.train_data_conversion import (
 from miles.utils.object_store import RayObjectStore
 from miles.utils.output_store.plan import StorePlan, StorePlanError
 from miles.utils.sampling_mask import RolloutSamplingMask
+from miles.utils.timer import Timer
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
@@ -492,6 +494,59 @@ class TestPostProcessRewards:
         import numpy as np
 
         assert abs(np.std(processed, ddof=1) - 1.0) < 1e-4
+
+    @pytest.mark.parametrize(
+        ("rewards", "right", "wrong"),
+        [
+            ([1.0, 0.0, 0.0, 0.0], 0.75 / 0.25**0.5, -(0.25**0.5)),
+            ([1.0, 1.0, 1.0, 0.0], 0.25 / 0.75**0.5, -(0.75**0.5)),
+        ],
+    )
+    def test_grpo_sqrt_success_normalization_divides_by_the_root_of_the_success_rate(self, rewards, right, wrong):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_std_normalization=True,
+            grpo_sqrt_success_normalization=True,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=rewards)
+
+        _, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
+        assert processed == pytest.approx([right if reward else wrong for reward in rewards], abs=1e-4)
+
+    def test_grpo_sqrt_length_reference_scales_each_answer_by_the_root_of_its_length(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_sqrt_length_reference=100,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[1.0, 0.0, 0.0, 0.0])
+        for sample, length in zip(samples, [100, 400, 25, 100], strict=True):
+            sample.response_length = length
+        # masked tokens, such as a tool's output, do not count toward the length
+        samples[1].response_length, samples[1].loss_mask = 500, [1] * 400 + [0] * 100
+
+        _, processed = _post_process_rewards(args, samples, custom_reward_post_process_func=None)
+
+        assert processed == pytest.approx([0.75, -0.25 * 2, -0.25 * 0.5, -0.25], abs=1e-6)
+
+    def test_grpo_sqrt_success_normalization_refuses_a_negative_reward(self):
+        args = make_args(
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_sqrt_success_normalization=True,
+            n_samples_per_prompt=4,
+            rollout_batch_size=1,
+        )
+        samples = make_samples_grouped(1, 4, rewards=[-1.0, -1.0, -1.0, 1.0])
+
+        with pytest.raises(AssertionError, match="never negative"):
+            _post_process_rewards(args, samples, custom_reward_post_process_func=None)
 
     def test_gspo_uses_grpo_normalization_path(self):
         args = make_args(
@@ -1293,3 +1348,84 @@ class TestOutputStoreTookEffect:
 
     def test_without_replay_there_is_nothing_to_store(self):
         assert "rollout_store_plan" not in self._convert([make_sample()], use_output_store=True)
+
+
+def _split_skipping_zero_advantage(rewards: list[float], lengths: list[int], *, dp_size: int = 2) -> list[dict]:
+    args = make_args(
+        skip_zero_advantage_samples=True,
+        global_batch_size=len(rewards),
+        use_dynamic_batch_size=True,
+        max_tokens_per_gpu=100,
+    )
+    data = _make_split_data(len(rewards), lengths=lengths)
+    data["rewards"] = rewards
+    data["raw_reward"] = list(rewards)
+    config = make_train_parallel_config(dp_size=dp_size, supports_precomputed_schedule=True)
+    return split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=config)
+
+
+def _trained(shards: list[dict]) -> list[int]:
+    return sorted(index for shard in shards for index in shard["sample_indices"])
+
+
+class TestSkipZeroAdvantageSamples:
+    def test_trains_only_samples_with_gradient_and_divides_by_the_whole_batch(self):
+        shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40])
+
+        assert _trained(shards) == [0, 2]
+        assert all(shard["num_rollouts"] == [4] for shard in shards)
+        assert all(shard["raw_reward"] == [1.0, 0.0, -1.0, 0.0] for shard in shards)
+
+    def test_the_timer_counts_only_the_samples_computed(self):
+        shards = _split_skipping_zero_advantage([1.0, 0.0, -1.0, 0.0], [10, 20, 30, 40])
+
+        rank_lengths = [process_rollout_data_shard(make_args(), shard)["total_lengths"] for shard in shards]
+
+        assert sorted(Timer().seq_lens) == [10, 30]
+        assert sorted(length for lengths in rank_lengths for length in lengths) == [10, 30]
+
+    def test_an_uneven_count_is_filled_with_the_shortest_zero_sample(self):
+        shards = _split_skipping_zero_advantage([1.0, 0.0, 0.0, 0.0], [10, 9, 3, 7])
+
+        assert _trained(shards) == [0, 2]
+
+    def test_an_all_zero_batch_still_gives_every_rank_a_micro_batch(self):
+        shards = _split_skipping_zero_advantage([0.0, 0.0, 0.0, 0.0], [10, 9, 3, 7])
+
+        assert _trained(shards) == [2, 3]
+        assert all(shard["num_microbatches"] == [1] for shard in shards)
+        assert all(len(shard["micro_batch_indices"]) == 1 for shard in shards)
+
+    @settings(max_examples=60, suppress_health_check=[HealthCheck.function_scoped_fixture])
+    @given(
+        st.lists(st.tuples(st.sampled_from([-1.0, 0.0, 1.0]), st.integers(1, 200)), min_size=1, max_size=32),
+        st.sampled_from([1, 2, 4]),
+    )
+    def test_any_batch_schedules_every_sample_with_gradient_and_splits_evenly(self, drawn, dp_size):
+        drawn = drawn * dp_size  # a batch whose size divides over the ranks, as a global batch must
+        rewards, lengths = [reward for reward, _ in drawn], [length for _, length in drawn]
+
+        shards = _split_skipping_zero_advantage(rewards, lengths, dp_size=dp_size)
+
+        trained = _trained(shards)
+        assert {i for i, reward in enumerate(rewards) if reward != 0.0} <= set(trained)
+        assert len(trained) % dp_size == 0
+        assert len({tuple(shard["num_microbatches"]) for shard in shards}) == 1
+        assert all(len(shard["micro_batch_indices"]) == shard["num_microbatches"][0] >= 1 for shard in shards)
+        for shard in shards:
+            assert [len(tokens) for tokens in shard["tokens"]] == [lengths[i] for i in shard["sample_indices"]]
+
+    def test_a_batch_off_the_rollout_side_schedule_is_refused(self):
+        args = make_args(skip_zero_advantage_samples=True)
+        config = make_train_parallel_config(dp_size=2, supports_precomputed_schedule=False)
+
+        with pytest.raises(ValueError, match="rollout-side schedule"):
+            split_train_data_by_dp(args, _make_split_data(8), train_parallel_config=config)
+
+    @pytest.mark.parametrize("rollout_ids", [[0, 1, 2, 3], [0, 0, 1, 1]], ids=["several-steps", "several-samples"])
+    def test_a_batch_that_is_not_one_step_of_single_sample_rollouts_is_refused(self, rollout_ids):
+        args = make_args(skip_zero_advantage_samples=True, global_batch_size=2)
+        data = _make_split_data(4, rollout_ids=rollout_ids)
+
+        with pytest.raises(AssertionError, match="one optimizer step"):
+            split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)

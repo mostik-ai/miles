@@ -57,6 +57,7 @@ def make_args(**overrides: Any) -> Namespace:
         use_dynamic_global_batch_size=False,
         wandb_always_use_train_step=False,
         disable_rollout_trim_samples=False,
+        skip_zero_advantage_samples=False,
         balance_data=False,
         delay_split_train_data_by_dp=False,
         # object store
@@ -68,6 +69,8 @@ def make_args(**overrides: Any) -> Namespace:
         advantage_estimator="grpo",
         rewards_normalization=True,
         grpo_std_normalization=False,
+        grpo_sqrt_success_normalization=False,
+        grpo_sqrt_length_reference=None,
         length_penalty_coeff=0.0,
         length_penalty_min_tokens=1,
         reward_key=None,

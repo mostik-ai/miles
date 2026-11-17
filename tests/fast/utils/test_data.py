@@ -216,6 +216,7 @@ def _delay_split_args(**overrides: Any) -> Namespace:
         balance_by_flops=False,
         allow_partial_train_step=False,
         multi_lora=False,
+        skip_zero_advantage_samples=False,
     )
     fields.update(overrides)
     return Namespace(**fields)

@@ -74,6 +74,17 @@ class LoraConfig(BaseConfig):
             )
         ),
     ] = None
+    lora_checkpoint_format: A[
+        str,
+        Arg(
+            choices=["adapter", "torch_dist"],
+            help=(
+                "adapter: save the adapter shards and their optimizer state, restored through --lora-adapter-path. "
+                "torch_dist: save Megatron's own checkpoint, the frozen model and the RNG state included, which --load "
+                "restores like any other run; Bridge LoRA only, since native adapters are not in Megatron's state."
+            ),
+        ),
+    ] = "adapter"
     lora_sync_from_tensor: A[
         bool,
         Arg(help="Sync LoRA weights via tensor instead of file (more efficient)"),
@@ -96,6 +107,16 @@ class LoraConfig(BaseConfig):
                 "base policy: SGLang LoRA serving and adapter weight sync are disabled "
                 "(only the base weights are synced). For models without SGLang LoRA "
                 "support (e.g. Inkling native LoRA)."
+            )
+        ),
+    ] = False
+    lora_merged_rollout: A[
+        bool,
+        Arg(
+            help=(
+                "Serve rollouts from the base weights with the trained adapter merged in: each weight update sends "
+                "the merged weights in full, as a full fine-tune does, so SGLang decodes without LoRA kernels and "
+                "can run a speculative drafter. Bridge LoRA only, and not with --colocate."
             )
         ),
     ] = False

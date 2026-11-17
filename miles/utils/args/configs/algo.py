@@ -205,6 +205,17 @@ class AlgoConfig(BaseConfig):
             )
         ),
     ] = False
+    skip_zero_advantage_samples: A[
+        bool,
+        Arg(
+            help=(
+                "Leave samples whose advantage is exactly zero out of training. They add exactly zero gradient, "
+                "so the update stays the same, up to rounding, while the trainer computes less: the loss still "
+                "divides by the whole batch, and an all-zero batch still steps the optimizer on the shortest "
+                "samples. Training metrics, tokens/s, TFLOPs and MFU then cover only the samples computed."
+            )
+        ),
+    ] = False
     # Off-Policy Correction using Importance Sampling: https://fengyao.notion.site/off-policy-rl
     use_tis: A[
         bool,
@@ -282,6 +293,17 @@ class AlgoRolloutOnlyConfig(BaseConfig):
             help="from Dr.GRPO https://arxiv.org/pdf/2503.20783",
         ),
     ] = True
+    grpo_sqrt_success_normalization: A[
+        bool,
+        Arg(help="Divide each group's advantages by the square root of its success rate, instead of its std."),
+    ] = False
+    grpo_sqrt_length_reference: A[
+        int | None,
+        Arg(
+            help="Scale each answer's advantage by the root of its length over this many tokens, so a token weighs "
+            "1 / sqrt(length * reference) instead of 1 / length."
+        ),
+    ] = None
     rewards_normalization: A[
         bool,
         Arg(

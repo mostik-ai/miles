@@ -623,13 +623,15 @@ def train_one_step(
     grad_norm = 0.0
     valid_step = True
     indep_dp_loss_reduced: dict[str, float] = {}
+    # with samples skipped, metrics average over those computed, not the batch the loss divides by
+    per_computed_sample = args.backend.calculate_per_token_loss or args.skip_zero_advantage_samples
+    metric_num_rollouts = None if per_computed_sample else num_rollouts
 
     if parallel_state.indep_dp.size > 1:
         assert step_id == 0, "indep-dp does not support multi step per train yet"
 
         reach_fault_hook(FaultHookName.TRAINER_STEP_BEFORE_ALLREDUCE, rollout_id=rollout_id, attempt=attempt)
 
-        metric_num_rollouts = None if args.backend.calculate_per_token_loss else num_rollouts
         ok, indep_dp_loss_reduced = allreduce_grads_and_losses_across_replicas(
             args,
             model,
@@ -712,7 +714,6 @@ def train_one_step(
             witness_dump_and_clear_stale(model=model, witness_info=witness_info, optimizer=optimizer)
 
         if mpu.is_pipeline_last_stage(ignore_virtual=True):
-            metric_num_rollouts = None if args.backend.calculate_per_token_loss else num_rollouts
             loss_reduced = (
                 indep_dp_loss_reduced
                 if parallel_state.indep_dp.size > 1
@@ -959,7 +960,7 @@ def save(
     if should_disable_forward_pre_hook(args):
         disable_forward_pre_hook(model)
 
-    if is_lora_model(model):
+    if is_lora_model(model) and args.lora_checkpoint_format == "adapter":
         assert adapter_slots is not None, "a LoRA --save needs the model's adapter slots"
         assert schedule_first_rollout is not None, "a LoRA --save records the rollout its schedule counts from"
         save_single_lora(model, optimizer, opt_param_scheduler, adapter_slots, args, iteration, schedule_first_rollout)
