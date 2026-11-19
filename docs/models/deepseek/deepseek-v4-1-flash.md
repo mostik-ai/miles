@@ -12,7 +12,7 @@ description: Launch recipe for DeepSeek-V4.1 with radixark/miles:dev — BF16 tr
 
 **Engram.** An additive n-gram hash memory at two layers. Token ids are normalized before hashing, so " The", "the" and "THE" cannot fork into separate rows. Its two fp8 tables are the largest single block of weight in the checkpoint.
 
-On the training side the Megatron plugin lives under `miles_plugins/models/deepseek_v4_1/`, the model definition is `scripts/models/deepseek-v4.1.py`, and the launcher is `scripts/run_deepseek_v4_1.py`. The plugin reproduces the model's fp4/fp8 quantization points in the training forward so the trainer scores what the served model computes, and carries the cross-layer state (mixing coefficients, source latents, top-k, candidate mask) inside the inter-layer hidden tensor so pipeline parallelism and full activation recompute work.
+On the training side the Megatron plugin lives under `miles_plugins/models/deepseek_v4_1/`, the model definition is `scripts/models/deepseek-v4.1.py`, and the launcher is `scripts/run_deepseek_v4_1.py`. The plugin reproduces the model's fp4/fp8 quantization points in the training forward so the trainer scores what the served model computes, and carries the cross-layer state (mixing coefficients, source latents, top-k, candidate mask) inside the inter-layer hidden tensor so pipeline parallelism and full activation recompute work. Every layer, the last one included, returns its four residual streams, followed by that carried state when it carries; the fold into one hidden runs after the layer loop. Megatron-Bridge builds the same layers (`miles_plugins/megatron_bridge/deepseek_v4_1.py`, `--megatron-to-hf-mode bridge`): it loads the served FP8 / MXFP4 checkpoint directly, dequantizing while it loads, and writes it back in that layout on export.
 
 ## 2. Supported Variants
 
@@ -145,7 +145,7 @@ Tensor, pipeline, context, expert and sequence parallelism are all supported. Fu
 
 The second layout is the one in [§3.5](#35-launch). Its speedup comes from the rollout side (decode CUDA graphs cut the rollout wait from 493 s to 200 s per step); train time is unchanged because PP 2 halves the layers per rank while full recompute adds a forward.
 
-Tensor, pipeline, context, expert and sequence parallelism can be combined freely; TP/CP/PP/EP combinations were cross-validated against each other and agree to the bf16 floor.
+Tensor, pipeline, context, expert and sequence parallelism can be combined freely; TP/CP/PP/EP combinations were cross-validated against each other and agree to the bf16 floor. Pipeline stages may be uneven (`--decoder-first-pipeline-num-layers`, `--decoder-last-pipeline-num-layers`) or interleaved (virtual pipeline stages), since every layer passes on the state later layers read. Packed sequences (`--qkv-format thd`) work without context parallelism: each sequence keeps its own sliding window, compressed rows, index picks, candidate blocks and Engram n-grams.
 
 An 8 x 8 H200 bring-up (TP 8, 16-GPU engines) also trains the full model; on SM90 the DeepGEMM paged indexer kernel is unavailable and the engines fall back to the torch indexer for decode, and the engines need data-parallel attention, which is on the H200 branch of the SGLang fork rather than the mainline fork.
 
