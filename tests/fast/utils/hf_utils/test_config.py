@@ -60,6 +60,23 @@ class TestLoadHfConfig:
             load_hf_config(str(tmp_path))
             load_hf_config(str(tmp_path))
 
+    def test_alias_wins_over_a_class_registered_after_it(self, tmp_path):
+        """A package imported later (SGLang's config registry) may register its own class under an alias's name."""
+        pytest.importorskip("transformers.models.deepseek_v3.configuration_deepseek_v3")
+        from transformers import AutoConfig
+        from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+        from transformers.models.deepseek_v3.configuration_deepseek_v3 import DeepseekV3Config
+
+        from miles.utils.hf_utils.config import load_hf_config
+
+        _write_config_json(str(tmp_path), {**DeepseekV3Config().to_dict(), "model_type": "deepseek_v41"})
+        load_hf_config(str(tmp_path))
+        alias = CONFIG_MAPPING["deepseek_v41"]
+        other = type("DeepseekV41Config", (DeepseekV3Config,), {"model_type": "deepseek_v41"})
+        AutoConfig.register("deepseek_v41", other, exist_ok=True)
+
+        assert type(load_hf_config(str(tmp_path))) is alias
+
     def test_native_support_raises_without_override(self, tmp_path):
         """If transformers ships native support for an alias, registration must fail loud."""
         from miles.utils.hf_utils import config as hf_config_module

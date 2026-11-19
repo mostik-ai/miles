@@ -66,6 +66,7 @@ _CONFIG_ALIASES: tuple[_HFConfigAlias, ...] = (
 )
 
 _REGISTERED_ALIASES: set[str] = set()
+_ALIAS_CONFIG_CLASSES: dict[str, type] = {}
 
 
 def register_hf_config_aliases() -> None:
@@ -73,10 +74,13 @@ def register_hf_config_aliases() -> None:
 
     Already called inside `load_hf_config` and `load_tokenizer`. Only call
     directly before a third-party entry point that won't go through either
-    (e.g. megatron's `_build_tokenizer`).
+    (e.g. megatron's `_build_tokenizer`). Each call registers the aliases again,
+    since a package imported after the first call (SGLang's config registry)
+    may have registered its own class under the same model_type.
     """
     for alias in _CONFIG_ALIASES:
         if alias.model_type in _REGISTERED_ALIASES:
+            AutoConfig.register(alias.model_type, _ALIAS_CONFIG_CLASSES[alias.model_type], exist_ok=True)
             continue
         if alias.model_type in CONFIG_MAPPING_NAMES and not alias.override_hf_native:
             raise RuntimeError(
@@ -106,6 +110,7 @@ def register_hf_config_aliases() -> None:
                 base_model_cls.__name__, (base_model_cls,), {"config_class": compat_config, "__module__": __name__}
             )
             auto_cls.register(compat_config, compat_model_cls, exist_ok=alias.override_hf_native)
+        _ALIAS_CONFIG_CLASSES[alias.model_type] = compat_config
         _REGISTERED_ALIASES.add(alias.model_type)
 
     try:

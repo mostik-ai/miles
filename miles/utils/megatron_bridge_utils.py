@@ -1,6 +1,7 @@
 from contextlib import contextmanager
 
 from miles.backends.training_utils.model_companion import ModelCompanionInstallationUtils
+from miles.utils.hf_utils.config import register_hf_config_aliases
 
 try:
     from megatron.core.utils import unwrap_model
@@ -13,6 +14,8 @@ def load_auto_bridge(hf_checkpoint: str):
 
     import miles_plugins.megatron_bridge  # noqa: F401
 
+    # AutoBridge reads config.json through AutoConfig, which must resolve Miles' aliases (deepseek_v41)
+    register_hf_config_aliases()
     return AutoBridge.from_hf_pretrained(hf_checkpoint, trust_remote_code=True)
 
 
