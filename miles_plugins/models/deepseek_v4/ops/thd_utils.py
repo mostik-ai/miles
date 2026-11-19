@@ -39,10 +39,18 @@ class ThdLayout:
 
     @classmethod
     def from_packed_seq_params(cls, packed_seq_params, *, cp_rank: int, seqlen_local: int):
-        """This rank's layout, or None for any format other than thd."""
+        """This rank's layout, or None for any format other than thd.
+
+        Megatron's own ``PackedSeqParams`` carries no host copy of ``cu_seqlens_q``; for it the
+        segment lengths are read back from the device once.
+        """
         if packed_seq_params is None or packed_seq_params.qkv_format != "thd":
             return None
-        cu_seqlens_host = packed_seq_params.cu_seqlens_host
+        cu_seqlens_host = getattr(
+            packed_seq_params, "cu_seqlens_host", None
+        )  # config-access-exempt: only Miles' PackedSeqParamsWithHostCuSeqlens carries the host copy
+        if cu_seqlens_host is None:
+            cu_seqlens_host = tuple(packed_seq_params.cu_seqlens_q.tolist())
         return cls(
             cu_seqlens=packed_seq_params.cu_seqlens_q,
             seq_lens=tuple(end - start for start, end in pairwise(cu_seqlens_host)),
