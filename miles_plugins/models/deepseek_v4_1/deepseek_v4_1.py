@@ -17,7 +17,6 @@ from megatron.core.tensor_parallel.mappings import (
     gather_from_sequence_parallel_region,
     scatter_to_sequence_parallel_region,
 )
-from megatron.core.transformer import transformer_block as _transformer_block
 from megatron.core.transformer.hyper_connection import BroadcastTensorFused, HyperConnectionModule
 from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -152,7 +151,6 @@ class V41TransformerLayer(HyperConnectionTransformerLayer):
                     self.pg_collection, "cp", None
                 ),  # config-access-exempt: Megatron process-group collections may omit context parallelism
             )
-        self.v41_is_last = self.layer_number == config.num_layers
         self.v41_carry = getattr(
             config, "v41_carry_state", False
         )  # config-access-exempt: Megatron configurations without V4.1 carry support omit this extension
@@ -166,11 +164,29 @@ class V41TransformerLayer(HyperConnectionTransformerLayer):
         if self.v41_engram is not None:
             hidden_states = self.v41_engram(hidden_states, rt.input_ids)
         output, context = super().forward(hidden_states, *args, **kwargs)
-        if self.v41_is_last:
-            output = v41_aggregate(output, rt.pre, self.config.num_residual_streams)
-        elif self.v41_carry:
+        if self.v41_carry:
             output = v41_pack_carry(output, rt, self.v41_plan)
         return output, context
+
+
+class V41OutputFold(MegatronModule):
+    """Folds the last layer's residual streams into one hidden with the ``pre`` of its last sublayer.
+
+    The block runs it after its layer loop, as its ``hc_head_contraction``, so the last layer returns its streams,
+    and the carried state when it carries, like every other layer.
+    """
+
+    def __init__(self, config: TransformerConfig):
+        super().__init__(config=config)
+        self.carry = config.v41_carry_state
+        self.n = config.num_residual_streams
+        self.stream_cols = config.hidden_size * config.num_residual_streams
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        rt = get_runtime(self.config)
+        if self.carry:
+            hidden_states = v41_unpack_carry(hidden_states, rt, self.stream_cols)
+        return v41_aggregate(hidden_states, rt.pre, self.n)
 
 
 class DeepSeekV41Attention(MegatronModule):
@@ -427,66 +443,61 @@ def _dsv41_attention_module_spec(config, backend=None):
     return ModuleSpec(module=DeepSeekV41Attention, submodules=None, metainfo={"fuse_input_layernorm": False})
 
 
-def _install_patches(config):
+def _install_patches():
     if getattr(
         GPTModel.forward, "v41_patched", False
     ):  # config-access-exempt: patch installation marker is attached to GPTModel.forward at runtime
         return
 
-    original_contract = _transformer_block.learned_output_contract
-
-    def output_contract(hidden_states, head_fn, base, scale, n, eps):
-        if hidden_states.shape[-1] == config.hidden_size:
-            return hidden_states
-        return original_contract(hidden_states, head_fn, base, scale, n, eps)
-
-    _transformer_block.learned_output_contract = output_contract
-
     original_forward = GPTModel.forward
 
     def forward(self, *args, **kwargs):
-        rt = get_runtime(self.config)
-        rt.reset()
-        rt.input_ids = kwargs.get("input_ids", args[0] if args else None)
+        rt = getattr(
+            self.config, "v41_runtime", None
+        )  # config-access-exempt: only DeepSeek-V4.1 configurations carry a runtime
+        if rt is not None:
+            rt.reset()
+            rt.input_ids = kwargs.get("input_ids", args[0] if args else None)
         return original_forward(self, *args, **kwargs)
 
     forward.v41_patched = True
     GPTModel.forward = forward
 
-    original_input_expand = HyperConnectionModule.input_expand
+    original_preprocess = TransformerBlock.preprocess_for_layer_schedule
 
-    def input_expand(hidden_states, n):
-        expanded = original_input_expand(hidden_states, n)
-        rt = get_runtime(config)
-        if (
-            getattr(config, "v41_carry_state", False) and rt.input_ids is not None
+    def preprocess_for_layer_schedule(self, hidden_states):
+        hidden_states = original_preprocess(self, hidden_states)
+        if not self.pre_process or not getattr(
+            self.config, "v41_carry_state", False
         ):  # config-access-exempt: Megatron configurations without V4.1 carry support omit this extension
-            expanded = v41_pack_carry(expanded, rt, V41IdsOnlyPlan)
-        return expanded
+            return hidden_states
+        rt = get_runtime(self.config)
+        if rt.input_ids is None:
+            return hidden_states
+        return v41_pack_carry(hidden_states, rt, V41IdsOnlyPlan)
 
-    HyperConnectionModule.input_expand = staticmethod(input_expand)
-
-    original_block_init = TransformerBlock.__init__
-
-    def block_init(self, *args, **kwargs):
-        original_block_init(self, *args, **kwargs)
-        for name in ("hc_head_fn", "hc_head_base", "hc_head_scale"):
-            if name in self._parameters:
-                self._parameters[name] = None
-
-    TransformerBlock.__init__ = block_init
+    TransformerBlock.preprocess_for_layer_schedule = preprocess_for_layer_schedule
 
 
 def get_dsv41_spec(args, config, vp_stage):
     assert args.dsv4_impl == "miles", "DeepSeek-V4.1 is only supported with --dsv4-impl miles"
     hf_config = load_hf_config(args.hf_checkpoint)
     apply_v41_config(config, hf_config)
+    config.v41_hf_checkpoint = args.hf_checkpoint
+    config.miles_dsa_topk_backend = args.miles_dsa_topk_backend
+    return dsv41_block_spec(config, vp_stage)
+
+
+def dsv41_block_spec(config, vp_stage: int | None = None):
+    """The DeepSeek-V4.1 layers of chunk ``vp_stage`` on this pipeline rank, as Megatron's layout places them.
+
+    ``config`` carries the ``v41_*`` fields of ``apply_v41_config``, ``v41_hf_checkpoint`` (Engram reads its tables
+    and tokenizer there) and ``miles_dsa_topk_backend``.
+    """
     config.v41_stage_bounds = v41_pipeline_bounds(config, vp_stage)
     config.v41_carry_state = config.pipeline_model_parallel_size > 1 or config.recompute_granularity == "full"
-    config.v41_hf_checkpoint = args.hf_checkpoint
     config.v41_runtime = V41Runtime()
-    config.miles_dsa_topk_backend = args.miles_dsa_topk_backend
-    _install_patches(config)
+    _install_patches()
 
     _orig_get_spec = _eav_specs.get_experimental_attention_variant_module_spec
 
@@ -501,6 +512,7 @@ def get_dsv41_spec(args, config, vp_stage):
     finally:
         _eav_specs.get_experimental_attention_variant_module_spec = _orig_get_spec
 
+    block_spec.hc_head_contraction = ModuleSpec(module=V41OutputFold)
     for layer_spec in block_spec.layer_specs:
         layer_spec.module = V41TransformerLayer
         layer_spec.submodules.self_attention_hyper_connection = V41HyperConnection

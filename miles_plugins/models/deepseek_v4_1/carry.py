@@ -23,14 +23,50 @@ class V41Runtime:
         self.candidates = None
 
 
+_PRE_TERMS = 3
+
+
+def _split_terms(values: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+    high = values.to(dtype)
+    middle = (values - high.float()).to(dtype)
+    low = (values - high.float() - middle.float()).to(dtype)
+    return torch.cat([high, middle, low], dim=-1)
+
+
+def _join_terms(terms: torch.Tensor) -> torch.Tensor:
+    n = terms.shape[-1] // _PRE_TERMS
+    return terms[..., :n].float() + terms[..., n : 2 * n].float() + terms[..., 2 * n :].float()
+
+
+class _PackPre(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, pre: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
+        return _split_terms(pre, dtype)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> tuple[torch.Tensor, None]:
+        return _join_terms(grad), None
+
+
+class _UnpackPre(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, packed: torch.Tensor) -> torch.Tensor:
+        ctx.dtype = packed.dtype
+        return _join_terms(packed)
+
+    @staticmethod
+    def backward(ctx, grad: torch.Tensor) -> torch.Tensor:
+        return _split_terms(grad, ctx.dtype)
+
+
 def v41_pack_pre(pre: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
-    hi = pre.to(dtype)
-    lo = (pre - hi.float()).to(dtype)
-    return torch.cat([hi, lo], dim=-1)
+    """The fp32 ``pre`` as three ``dtype`` terms whose fp32 sum is ``pre`` exactly; its gradient comes back the same
+    way, so neither direction rounds to ``dtype``."""
+    return _PackPre.apply(pre, dtype)
 
 
-def v41_unpack_pre(packed: torch.Tensor, n: int) -> torch.Tensor:
-    return packed[..., :n].float() + packed[..., n:].float()
+def v41_unpack_pre(packed: torch.Tensor) -> torch.Tensor:
+    return _UnpackPre.apply(packed)
 
 
 def v41_kv_source_layer(config, layer_id: int):
@@ -140,8 +176,8 @@ def v41_unpack_carry(hidden: torch.Tensor, rt, base_cols: int) -> torch.Tensor:
     for i in range(header[0]):
         kind, key, d0, d1, d2 = header[1 + 5 * i : 6 + 5 * i]
         if kind == _CARRY_PRE:
-            n = 2 * d0 * d1 * d2
-            rt.pre = v41_unpack_pre(carry[off : off + n].view(d0, d1, 2 * d2), d2)
+            n = _PRE_TERMS * d0 * d1 * d2
+            rt.pre = v41_unpack_pre(carry[off : off + n].view(d0, d1, _PRE_TERMS * d2))
         elif kind == _CARRY_IDS:
             n = 2 * d0 * d1
             rt.input_ids = carry[off : off + n].detach().view(torch.int32).view(d0, d1).to(torch.int64)
