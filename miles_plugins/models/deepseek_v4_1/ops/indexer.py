@@ -14,11 +14,13 @@ from miles.kernels.position.rope import apply_rotary_emb
 from miles.kernels.quant.fake_quant import fake_quant_fp4
 from miles.utils.replay_base import indexer_replay_manager
 from miles_plugins.models.deepseek_v4.ops.norm import RMSNorm
+from miles_plugins.models.deepseek_v4_1.ops.packed import PackedSegment
 
 
 def select_candidate_blocks(
     logits: torch.Tensor, compress_lens: torch.Tensor, topk_blocks: int, block_size: int
 ) -> torch.Tensor:
+    """The candidate blocks of each query: ``[..., ceil(width / block_size)]`` bool, one flag per block of keys."""
     width = logits.size(-1)
     scores = F.pad(logits, (0, -width % block_size), value=-torch.inf)
     scores = scores.unflatten(-1, (-1, block_size)).amax(dim=-1)
@@ -26,8 +28,12 @@ def select_candidate_blocks(
     last = (compress_lens - 1) // block_size
     scores = scores.masked_fill(torch.arange(num_blocks, device=logits.device) == last, torch.inf)
     top = scores.topk(min(topk_blocks, num_blocks), dim=-1)
-    keep = torch.zeros_like(scores, dtype=torch.bool).scatter_(-1, top.indices, top.values > -torch.inf)
-    return keep.repeat_interleave(block_size, dim=-1)[..., :width]
+    return torch.zeros_like(scores, dtype=torch.bool).scatter_(-1, top.indices, top.values > -torch.inf)
+
+
+def expand_candidate_blocks(blocks: torch.Tensor, width: int, block_size: int) -> torch.Tensor:
+    """Spread each query's candidate block flags over the ``width`` keys they cover."""
+    return blocks.repeat_interleave(block_size, dim=-1)[..., :width]
 
 
 INDEXER_QUERY_CHUNK = int(os.environ.get("MILES_DSV41_INDEXER_QUERY_CHUNK", "8192"))
@@ -97,7 +103,8 @@ def indexer_select(
             cand_parts.append(cand)
         elif uses_candidates:
             assert candidates is not None
-            scores[..., :n_kv].masked_fill_(~candidates[:, s:e], -torch.inf)
+            in_candidates = expand_candidate_blocks(candidates[:, s:e], n_kv, candidate_block_size)
+            scores[..., :n_kv].masked_fill_(~in_candidates, -torch.inf)
         if deep_selecting:
             flat = scores.reshape(bsz * (e - s), scores.size(-1))
             row_end = lens.to(torch.int32).repeat(bsz)
@@ -126,6 +133,57 @@ def indexer_select(
     idx = idx_parts[0] if len(idx_parts) == 1 else torch.cat(idx_parts, dim=1)
     if is_candidate_source:
         candidates = cand_parts[0] if len(cand_parts) == 1 else torch.cat(cand_parts, dim=1)
+    return idx, candidates
+
+
+def indexer_select_packed(
+    q: torch.Tensor,
+    index_k: torch.Tensor,
+    weights: torch.Tensor,
+    segments: tuple[PackedSegment, ...],
+    candidates: torch.Tensor | None,
+    *,
+    ratio: int,
+    is_candidate_source: bool,
+    uses_candidates: bool,
+    candidate_block_size: int,
+    topk: int,
+    **select_options,
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """``indexer_select`` run on each sequence of a packed stream alone, as if the stream held only it.
+
+    The picks are absolute compressed rows; the candidate blocks of a query start at its own sequence's first
+    compressed row, so they are as wide as the longest sequence's blocks.
+    """
+    bsz, total_rows = q.shape[:2]
+    idx = torch.full((bsz, total_rows, topk), -1, dtype=torch.int64, device=q.device)
+    if is_candidate_source:
+        widest = max(segment.key_end - segment.key_start for segment in segments)
+        candidates = torch.zeros(
+            bsz, total_rows, -(-widest // candidate_block_size), dtype=torch.bool, device=q.device
+        )
+    for segment in segments:
+        n_keys = segment.key_end - segment.key_start
+        if n_keys == 0:
+            continue
+        rows = slice(segment.row_start, segment.row_end)
+        num_blocks = -(-n_keys // candidate_block_size)
+        compress_lens = torch.arange(1, segment.row_end - segment.row_start + 1, device=q.device) // ratio
+        segment_idx, segment_candidates = indexer_select(
+            q[:, rows],
+            index_k[:, segment.key_start : segment.key_end],
+            weights[:, rows],
+            compress_lens,
+            candidates[:, rows, :num_blocks] if uses_candidates else None,
+            is_candidate_source=is_candidate_source,
+            uses_candidates=uses_candidates,
+            candidate_block_size=candidate_block_size,
+            topk=topk,
+            **select_options,
+        )
+        idx[:, rows] = torch.where(segment_idx >= 0, segment_idx + segment.key_start, -1)
+        if is_candidate_source:
+            candidates[:, rows, :num_blocks] = segment_candidates
     return idx, candidates
 
 
@@ -197,9 +255,19 @@ class DeepSeekV41Indexer(MegatronModule):
         qr: torch.Tensor,
         index_k: torch.Tensor,
         freqs_cis: torch.Tensor,
-        compress_lens: torch.Tensor,
         candidates: torch.Tensor | None,
+        *,
+        compress_lens: torch.Tensor | None = None,
+        segments: tuple[PackedSegment, ...] | None = None,
     ):
+        """
+        Args:
+            compress_lens: for an unpacked batch, the compressed rows each query may read, from the first.
+            segments: for a packed stream, its sequences; exactly one of the two is given.
+        Returns:
+            The top-k compressed rows of each query, -1 past its picks, and the candidate blocks.
+        """
+        assert (compress_lens is None) != (segments is None), "pass compress_lens for bshd or segments for thd"
         bsz, seqlen, _ = x.shape
         rd = self.rope_head_dim
         q, _ = self.linear_wq_b(qr)
@@ -209,13 +277,9 @@ class DeepSeekV41Indexer(MegatronModule):
         weights, _ = self.linear_weights_proj(x)
         weights = weights * (self.softmax_scale * self.index_n_heads**-0.5)
 
+        replaying = indexer_replay_manager.enabled and indexer_replay_manager.stage != "fallthrough"
         topk_fn = indexer_replay_manager.get_topk_fn(get_dsa_topk_fn(self.topk_backend), return_probs=False)
-        idx, candidates = indexer_select(
-            q,
-            index_k,
-            weights,
-            compress_lens,
-            candidates,
+        options = dict(
             is_candidate_source=self.is_candidate_source,
             uses_candidates=self.uses_candidates,
             candidate_topk_blocks=self.candidate_topk_blocks,
@@ -223,8 +287,11 @@ class DeepSeekV41Indexer(MegatronModule):
             topk=self.index_topk,
             topk_fn=topk_fn,
             canonical_topk=self.topk_backend == "canonical",
-            allow_deep_select=self.topk_backend == "torch"
-            and (not indexer_replay_manager.enabled or indexer_replay_manager.stage == "fallthrough"),
+            allow_deep_select=self.topk_backend == "torch" and not replaying,
             query_chunk=INDEXER_QUERY_CHUNK,
         )
-        return idx, candidates
+        if segments is None:
+            return indexer_select(q, index_k, weights, compress_lens, candidates, **options)
+        if replaying:
+            raise NotImplementedError("DeepSeek-V4.1 indexer replay does not support packed (thd) sequences")
+        return indexer_select_packed(q, index_k, weights, segments, candidates, ratio=self.compress_ratio, **options)

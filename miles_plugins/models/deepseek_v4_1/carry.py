@@ -125,7 +125,6 @@ class V41CarryPlan:
         self.topk = nxt < n_layers and ratios[nxt] > 0 and nxt not in config.v41_index_source_layer_ids
         cand = config.v41_candidate_source_layer_id
         self.candidates = 0 <= cand <= layer_id and any(cand < layer and ratios[layer] for layer in later)
-        self.candidate_block_size = config.v41_candidate_block_size
         self.input_ids = bool(config.v41_engram_layer_ids) and layer_id < max(config.v41_engram_layer_ids)
 
 
@@ -149,9 +148,7 @@ def v41_pack_carry(hidden: torch.Tensor, rt, plan: V41CarryPlan) -> torch.Tensor
     if plan.topk:
         add(_CARRY_TOPK, 0, rt.topk.shape, _bits_to_bf16(rt.topk))
     if plan.candidates:
-        bs = plan.candidate_block_size
-        blocks = rt.candidates[..., ::bs]
-        add(_CARRY_CAND, bs, (*rt.candidates.shape[:-1], rt.candidates.shape[-1]), _bits_to_bf16(blocks))
+        add(_CARRY_CAND, 0, rt.candidates.shape, _bits_to_bf16(rt.candidates))
     header = torch.zeros(_CARRY_HEADER_INTS, dtype=torch.int32, device=hidden.device)
     header[0] = len(meta)
     flat_meta = [v for m in meta for v in m]
@@ -191,12 +188,9 @@ def v41_unpack_carry(hidden: torch.Tensor, rt, base_cols: int) -> torch.Tensor:
             n = 2 * d0 * d1 * d2
             rt.topk = carry[off : off + n].detach().view(torch.int32).view(d0, d1, d2).to(torch.int64)
         elif kind == _CARRY_CAND:
-            bs = key
-            nb = -(-d2 // bs)
-            n = (d0 * d1 * nb + 1) // 2
+            n = (d0 * d1 * d2 + 1) // 2
             raw = carry[off : off + n].detach().view(torch.uint8)
-            blocks = raw[: d0 * d1 * nb].view(d0, d1, nb).bool()
-            rt.candidates = blocks.repeat_interleave(bs, dim=-1)[..., :d2]
+            rt.candidates = raw[: d0 * d1 * d2].view(d0, d1, d2).bool()
         else:
             raise ValueError(f"unknown carry section {kind}")
         off += n

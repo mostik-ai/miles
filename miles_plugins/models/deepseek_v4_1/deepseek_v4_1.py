@@ -38,6 +38,7 @@ from miles_plugins.models.deepseek_v4.ops.cp_utils import (
 )
 from miles_plugins.models.deepseek_v4.ops.grouped_matmul import GroupedMatmul
 from miles_plugins.models.deepseek_v4.ops.rope import wrapped_precompute_freqs_cis
+from miles_plugins.models.deepseek_v4.ops.thd_utils import ThdLayout, get_q_positions_thd, get_window_topk_idxs_thd
 from miles_plugins.models.deepseek_v4_1.carry import (
     V41CarryPlan,
     V41IdsOnlyPlan,
@@ -49,6 +50,7 @@ from miles_plugins.models.deepseek_v4_1.engram import DeepSeekV41Engram
 from miles_plugins.models.deepseek_v4_1.ops.compressor import DeepSeekV41Compressor
 from miles_plugins.models.deepseek_v4_1.ops.indexer import DeepSeekV41Indexer
 from miles_plugins.models.deepseek_v4_1.ops.kvnorm import compressed_kv_stored, kv_norm_rope_fp8
+from miles_plugins.models.deepseek_v4_1.ops.packed import PackedCompression, packed_compression
 
 HC_FUSED = os.environ.get("MILES_DSV41_HC_FUSED", "0") == "1"
 
@@ -162,7 +164,7 @@ class V41TransformerLayer(HyperConnectionTransformerLayer):
         if self.v41_carry:
             hidden_states = v41_unpack_carry(hidden_states, rt, self.v41_base_cols)
         if self.v41_engram is not None:
-            hidden_states = self.v41_engram(hidden_states, rt.input_ids)
+            hidden_states = self.v41_engram(hidden_states, rt.input_ids, kwargs.get("packed_seq_params"))
         output, context = super().forward(hidden_states, *args, **kwargs)
         if self.v41_carry:
             output = v41_pack_carry(output, rt, self.v41_plan)
@@ -361,19 +363,26 @@ class DeepSeekV41Attention(MegatronModule):
         bsz, seqlen, _ = x.shape
         rd = self.rope_head_dim
         ratio = self.compress_ratio
-        rt = get_runtime(self.config)
         cp = self.cp_size
-        seqlen_global = seqlen * cp
-        if cp > 1 and ratio:
+        packed = packed_seq_params is not None and packed_seq_params.qkv_format == "thd"
+        if packed:
+            assert cp == 1, "DeepSeek-V4.1 attention does not support thd with context parallelism"
+        elif cp > 1 and ratio:
             assert (
                 seqlen % ratio == 0
             ), f"context-parallel chunk {seqlen} must be a multiple of the compress ratio {ratio}"
+        seqlen_global = seqlen * cp
 
         rope_base = self.config.csa_compress_rotary_base if ratio else self.config.rotary_base
         freqs_full = wrapped_precompute_freqs_cis(self.config, rd, rope_base, not ratio, seqlen_global, x.device)[
             :seqlen_global
         ]
-        freqs_cis = get_freqs_cis_for_cp(freqs_full, seqlen, cp, self.cp_group)
+        if packed:
+            q_positions = get_q_positions_thd(packed_seq_params.cu_seqlens_q, seqlen)
+            freqs_cis = freqs_full.index_select(0, q_positions)
+        else:
+            q_positions = get_q_positions_for_cp(seqlen, cp_size=cp, cp_group=self.cp_group, device=x.device)
+            freqs_cis = get_freqs_cis_for_cp(freqs_full, seqlen, cp, self.cp_group)
 
         qr = self.q_layernorm(self.linear_q_down_proj(x)[0])
         q = self.linear_q_up_proj(qr)[0].unflatten(-1, (self.n_local_heads, self.head_dim)).clone()
@@ -381,42 +390,23 @@ class DeepSeekV41Attention(MegatronModule):
 
         kv = kv_norm_rope_fp8(self.linear_kv_proj(x)[0], self.kv_layernorm.weight, self.eps, freqs_cis, rd)
 
-        q_positions = get_q_positions_for_cp(seqlen, cp_size=cp, cp_group=self.cp_group, device=x.device)
-        topk_idxs = get_window_topk_idxs_cp(q_positions, window_size=self.window_size, cp_size=cp, bsz=bsz)
+        if packed:
+            topk_idxs = get_window_topk_idxs_thd(
+                packed_seq_params.cu_seqlens_q, window_size=self.window_size, total_tokens=seqlen
+            )
+        else:
+            topk_idxs = get_window_topk_idxs_cp(q_positions, window_size=self.window_size, cp_size=cp, bsz=bsz)
         if cp > 1:
             kv = all_gather_cp(kv, dim=1, cp_group=self.cp_group)
 
         if ratio:
-            offset = seqlen_global
-            compress_lens = (q_positions + 1) // ratio
-            if self.is_kv_source:
-                latent = self.core_attention.compressor(hidden_states)
-                latent = einops.rearrange(latent, "n b d -> b n d")
-                n_groups = latent.size(1)
-                freqs_compress = get_freqs_cis_for_cp(freqs_full, seqlen, cp, self.cp_group, stride=ratio)[:n_groups]
-                if self.is_index_source:
-                    index_k = self.core_attention.indexer.index_keys(latent, freqs_compress)
-                    if cp > 1:
-                        index_k = all_gather_cp(index_k, dim=1, cp_group=self.cp_group)
-                    rt.index_k[self.layer_id] = index_k
-                latent = latent.clone(memory_format=torch.contiguous_format)
-                apply_rotary_emb(latent[..., -rd:], freqs_compress)
-                latent = fake_quant_compressed_kv(latent)
-                latent = compressed_kv_stored(latent, rd)
-                if cp > 1:
-                    latent = all_gather_cp(latent, dim=1, cp_group=self.cp_group)
-                rt.latent[self.layer_id] = latent
-            latent = rt.latent[self.kv_source_layer]
-            if self.is_index_source:
-                topk_rel, candidates = self.core_attention.indexer(
-                    x, qr, rt.index_k[self.kv_source_layer], freqs_cis, compress_lens, rt.candidates
-                )
-                rt.topk = topk_rel
-                if candidates is not None:
-                    rt.candidates = candidates
-            topk_rel = rt.topk
-            assert topk_rel is not None, f"layer {self.layer_id}: no index_source layer ran before it"
-            compress_idxs = torch.where(topk_rel < 0, -1, topk_rel + offset).int()
+            compression = None
+            if packed and (self.is_kv_source or self.is_index_source):
+                thd = ThdLayout.from_packed_seq_params(packed_seq_params, cp_rank=0, seqlen_local=seqlen)
+                compression = packed_compression(thd, ratio=ratio, total_rows=seqlen)
+            compress_idxs, latent = self._compressed_kv(
+                hidden_states, x, qr, freqs_full, freqs_cis, q_positions, compression
+            )
             topk_idxs = torch.cat([topk_idxs, compress_idxs], dim=-1)
             kv = torch.cat([kv, latent], dim=1)
 
@@ -437,6 +427,58 @@ class DeepSeekV41Attention(MegatronModule):
         if self.sequence_parallel:
             output = scatter_to_sequence_parallel_region(output, group=self.tp_group)
         return output, None
+
+    def _compressed_kv(
+        self, hidden_states, x, qr, freqs_full, freqs_cis, q_positions, compression: PackedCompression | None
+    ):
+        """The compressed rows this layer attends to, and each query's picks among them as rows of its KV.
+
+        ``compression`` lays out a packed stream's compressed rows for a source layer, whose every sequence compresses
+        and picks among its own rows alone; it is None for an unpacked batch and for a layer that reuses a source's.
+        """
+        rt = get_runtime(self.config)
+        if self.is_kv_source:
+            self._store_source_kv(hidden_states, freqs_full, compression)
+        latent = rt.latent[self.kv_source_layer]
+        if self.is_index_source:
+            if compression is None:
+                rows = dict(compress_lens=(q_positions + 1) // self.compress_ratio)
+            else:
+                rows = dict(segments=compression.segments)
+            topk, candidates = self.core_attention.indexer(
+                x, qr, rt.index_k[self.kv_source_layer], freqs_cis, rt.candidates, **rows
+            )
+            rt.topk = topk
+            if candidates is not None:
+                rt.candidates = candidates
+        assert rt.topk is not None, f"layer {self.layer_id}: no index_source layer ran before it"
+        kv_rows = x.size(1) * self.cp_size
+        return torch.where(rt.topk < 0, -1, rt.topk + kv_rows).int(), latent
+
+    def _store_source_kv(self, hidden_states, freqs_full, compression: PackedCompression | None):
+        """Compress this source layer's tokens into the latents, and index keys, that later layers read."""
+        rt = get_runtime(self.config)
+        ratio, rd, cp = self.compress_ratio, self.rope_head_dim, self.cp_size
+        token_rows = None if compression is None else compression.token_rows
+        latent = einops.rearrange(self.core_attention.compressor(hidden_states, token_rows), "n b d -> b n d")
+        if compression is None:
+            seqlen = hidden_states.size(0)
+            freqs_compress = get_freqs_cis_for_cp(freqs_full, seqlen, cp, self.cp_group, stride=ratio)
+            freqs_compress = freqs_compress[: latent.size(1)]
+        else:
+            freqs_compress = freqs_full.index_select(0, compression.positions)
+        if self.is_index_source:
+            index_k = self.core_attention.indexer.index_keys(latent, freqs_compress)
+            if cp > 1:
+                index_k = all_gather_cp(index_k, dim=1, cp_group=self.cp_group)
+            rt.index_k[self.layer_id] = index_k
+        latent = latent.clone(memory_format=torch.contiguous_format)
+        apply_rotary_emb(latent[..., -rd:], freqs_compress)
+        latent = fake_quant_compressed_kv(latent)
+        latent = compressed_kv_stored(latent, rd)
+        if cp > 1:
+            latent = all_gather_cp(latent, dim=1, cp_group=self.cp_group)
+        rt.latent[self.layer_id] = latent
 
 
 def _dsv41_attention_module_spec(config, backend=None):

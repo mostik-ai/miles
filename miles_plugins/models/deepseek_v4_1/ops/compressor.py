@@ -20,11 +20,21 @@ class DeepSeekV41Compressor(nn.Module):
         self.norm = RMSNorm(head_dim, config.layernorm_epsilon)
         mark_keep_in_fp32(self.norm.weight)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        seqlen, bsz, _ = x.shape
+    def forward(self, x: torch.Tensor, token_rows: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Args:
+            x: [seqlen, batch, hidden] tokens.
+            token_rows: for a packed stream, the ``[groups, ratio]`` rows of ``x`` each compressed row folds; None
+                folds consecutive rows from the first.
+        Returns:
+            [groups, batch, head_dim] compressed rows.
+        """
         ratio = self.compress_ratio
         if ratio == 1:
             return self.norm(F.linear(x, self.linear_wkv.weight))
+        if token_rows is not None:
+            x = x.index_select(0, token_rows.flatten())
+        seqlen, bsz, _ = x.shape
         groups = seqlen // ratio
         x = x[: groups * ratio].float()
         kv = F.linear(x, self.linear_wkv.weight.float())
