@@ -124,7 +124,10 @@ class V41CarryPlan:
         nxt = layer_id + 1
         self.topk = nxt < n_layers and ratios[nxt] > 0 and nxt not in config.v41_index_source_layer_ids
         cand = config.v41_candidate_source_layer_id
-        self.candidates = 0 <= cand <= layer_id and any(cand < layer and ratios[layer] for layer in later)
+        # the index source layers after the candidate source score among its candidate blocks
+        self.candidates = 0 <= cand <= layer_id and any(
+            cand < layer and layer in config.v41_index_source_layer_ids for layer in later
+        )
         self.input_ids = bool(config.v41_engram_layer_ids) and layer_id < max(config.v41_engram_layer_ids)
 
 

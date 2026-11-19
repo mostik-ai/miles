@@ -20,9 +20,9 @@ from megatron.core.tensor_parallel.mappings import (
 from megatron.core.transformer.hyper_connection import BroadcastTensorFused, HyperConnectionModule
 from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
 from megatron.core.transformer.spec_utils import ModuleSpec
-from megatron.core.transformer.transformer_block import TransformerBlock, get_num_layers_to_build
+from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer, get_transformer_layer_offset
+from megatron.core.transformer.transformer_layer import HyperConnectionTransformerLayer
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 
 from miles.kernels.attention.dsa import sparse_attention
@@ -89,17 +89,6 @@ def v41_aggregate(x: torch.Tensor, pre: torch.Tensor | None, n: int) -> torch.Te
         return mhc_aggregate(x, pre, n)
     streams = x.view(s, b, n, nc // n).float()
     return (pre.float().unsqueeze(-1) * streams).sum(dim=2).to(x.dtype)
-
-
-def v41_pipeline_bounds(config, vp_stage):
-    pp = config.pipeline_model_parallel_size
-    if pp == 1:
-        return None
-    assert config.virtual_pipeline_model_parallel_size in (None, 1), "DeepSeek-V4.1 plugin: no virtual pipeline"
-    assert config.pipeline_model_parallel_layout is None and config.num_layers_in_first_pipeline_stage is None
-    assert config.num_layers_in_last_pipeline_stage is None and config.num_layers % pp == 0
-    offset = get_transformer_layer_offset(config, vp_stage)
-    return offset + 1, offset + get_num_layers_to_build(config, vp_stage)
 
 
 class V41HyperConnection(HyperConnectionModule):
@@ -534,9 +523,9 @@ def dsv41_block_spec(config, vp_stage: int | None = None):
     """The DeepSeek-V4.1 layers of chunk ``vp_stage`` on this pipeline rank, as Megatron's layout places them.
 
     ``config`` carries the ``v41_*`` fields of ``apply_v41_config``, ``v41_hf_checkpoint`` (Engram reads its tables
-    and tokenizer there) and ``miles_dsa_topk_backend``.
+    and tokenizer there) and ``miles_dsa_topk_backend``. Each layer passes on the state later layers need, so any
+    pipeline layout works, with virtual stages and uneven stages.
     """
-    config.v41_stage_bounds = v41_pipeline_bounds(config, vp_stage)
     config.v41_carry_state = config.pipeline_model_parallel_size > 1 or config.recompute_granularity == "full"
     config.v41_runtime = V41Runtime()
     _install_patches()
