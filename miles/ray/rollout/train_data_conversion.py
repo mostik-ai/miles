@@ -487,10 +487,8 @@ def split_train_data_by_dp_scheduled_raw(
     global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
     scheduled_rollouts = global_batch_size
     if args.skip_zero_advantage_samples:
-        rollout_ids = data["rollout_ids"]
-        assert (
-            len(set(rollout_ids)) == len(rollout_ids) == global_batch_size
-        ), "skipping trains each batch in one optimizer step, of one sample per rollout"
+        assert len(set(data["rollout_ids"])) == global_batch_size, "skipping trains each batch in one optimizer step"
+        _check_one_advantage_per_rollout(data)
         data = _samples_with_gradient(data, train_parallel_config.micro_batch_alignment)
         scheduled_rollouts = len(set(data["rollout_ids"]))
 
@@ -523,10 +521,25 @@ def split_train_data_by_dp_scheduled_raw(
     return shards
 
 
+def _check_one_advantage_per_rollout(data: dict[str, Any]) -> None:
+    """Every sample of a rollout carries the rollout's advantage, as the per-rollout normalization broadcasts it, so the
+    samples whose advantage is zero are whole rollouts, and a rollout of several samples (a multi-turn episode) is trained
+    whole or skipped whole."""
+    advantages: dict[Any, float] = {}
+    for rollout_id, reward in zip(data["rollout_ids"], data["rewards"], strict=True):
+        first = advantages.setdefault(rollout_id, reward)
+        assert first == reward, (
+            f"skipping drops whole rollouts, whose samples share one advantage; rollout {rollout_id} has {first} and "
+            f"{reward}"
+        )
+
+
 def _samples_with_gradient(data: dict[str, Any], align_to: int) -> dict[str, Any]:
     """``data`` without the samples whose advantage, their reward under GRPO, is exactly zero, which add exactly zero
-    gradient. Keeps the shortest of those needed for a multiple of ``align_to`` samples, the count the schedule can
-    always split into a micro-batch for every rank, whose collectives need one."""
+    gradient: whole rollouts, since a rollout's samples share its advantage. Keeps the shortest of those needed for a
+    multiple of ``align_to`` samples, the count the schedule can always split into a micro-batch for every rank, whose
+    collectives need one. The kept samples keep their rollouts' loss denominators (rollout_mask_sums), which count every
+    sample of the rollout."""
     rewards = data["rewards"]
     kept = [i for i, reward in enumerate(rewards) if reward != 0.0]
     fillers = sorted((i for i, reward in enumerate(rewards) if reward == 0.0), key=lambda i: len(data["tokens"][i]))

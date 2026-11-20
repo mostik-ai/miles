@@ -1,15 +1,20 @@
 from __future__ import annotations
 
+import copy
+import random
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
 import torch
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
+from tests.fast.backends.training_utils.loss.loss_test_utils import make_parallel_state
 from tests.fast.ray.rollout.conftest import make_args, make_rollout_config, make_sample, make_samples_grouped
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
 from tests.fast.utils.output_store.test_plan import ALL, INDEXER, MASK, R3, fake_store_refs, response
 
+from miles.backends.training_utils.data.context_parallel import get_sum_of_sample_mean
 from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import (
     ROLLOUT_DATA_VALUE_SPEC,
@@ -1422,10 +1427,104 @@ class TestSkipZeroAdvantageSamples:
         with pytest.raises(ValueError, match="rollout-side schedule"):
             split_train_data_by_dp(args, _make_split_data(8), train_parallel_config=config)
 
-    @pytest.mark.parametrize("rollout_ids", [[0, 1, 2, 3], [0, 0, 1, 1]], ids=["several-steps", "several-samples"])
-    def test_a_batch_that_is_not_one_step_of_single_sample_rollouts_is_refused(self, rollout_ids):
+    def test_a_batch_that_is_not_one_step_is_refused(self):
         args = make_args(skip_zero_advantage_samples=True, global_batch_size=2)
-        data = _make_split_data(4, rollout_ids=rollout_ids)
+        data = _make_split_data(4, rollout_ids=[0, 1, 2, 3])
 
         with pytest.raises(AssertionError, match="one optimizer step"):
             split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+    def test_a_multi_turn_rollout_is_trained_whole_or_skipped_whole(self):
+        args = make_args(
+            skip_zero_advantage_samples=True, global_batch_size=4, use_dynamic_batch_size=True, max_tokens_per_gpu=100
+        )
+        data = _make_split_data(8, lengths=[10, 11, 12, 13, 14, 2, 15, 16], rollout_ids=[0, 0, 0, 1, 1, 2, 3, 3])
+        data["rewards"] = [0.5, 0.5, 0.5, 0.0, 0.0, 0.0, -0.5, -0.5]
+        data["raw_reward"] = list(data["rewards"])
+        config = make_train_parallel_config(dp_size=2, supports_precomputed_schedule=True)
+
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=config)
+
+        # rollouts 0 and 3 whole, and the shortest zero sample (rollout 2's) to give each rank its share
+        assert _trained(shards) == [0, 1, 2, 5, 6, 7]
+        assert all(shard["num_rollouts"] == [4] for shard in shards)
+
+    def test_a_rollout_whose_samples_disagree_on_their_advantage_is_refused(self):
+        args = make_args(skip_zero_advantage_samples=True, global_batch_size=2)
+        data = _make_split_data(4, rollout_ids=[0, 0, 1, 1])
+        data["rewards"] = [0.5, 0.0, -0.5, -0.5]
+
+        with pytest.raises(AssertionError, match="share one advantage"):
+            split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+
+
+def _multi_turn_batch() -> list:
+    """Four groups of four multi-turn episodes, each episode one rollout of one to four turn samples: a mixed group, an
+    all-right one, an all-wrong one, and a mixed one whose third episode is invalid (left out, carrying the group's
+    valid mean as agentic runs give it)."""
+    outcomes = [[1.0, 0.0, 1.0, 0.0], [1.0, 1.0, 1.0, 1.0], [0.0, 0.0, 0.0, 0.0], [1.0, 0.0, None, 0.0]]
+    generator = random.Random(20261120)
+    samples = []
+    for group, rewards in enumerate(outcomes):
+        valid = [reward for reward in rewards if reward is not None]
+        for episode, reward in enumerate(rewards):
+            for _ in range(generator.randint(1, 4)):
+                sample = make_sample(index=len(samples), response_length=generator.randint(3, 9))
+                sample.loss_mask = [generator.choice([0, 1, 1]) for _ in range(sample.response_length)]
+                sample.group_index, sample.rollout_id = group, group * 4 + episode
+                sample.reward = sum(valid) / len(valid) if reward is None else reward
+                sample.remove_sample = reward is None
+                samples.append(sample)
+    return samples
+
+
+def _surrogate_gradients(args: Any, data: dict, dp_size: int) -> dict[int, torch.Tensor]:
+    """Each sample's gradient, with respect to its response tokens' log-probabilities, of the on-policy GRPO surrogate
+    (-advantage * log-probability a token) reduced as the trainer reduces it: each rollout's tokens averaged over its loss
+    tokens (rollout_mask_sums), the batch divided by its rollout count. The model's parameter gradient is a linear map of
+    these."""
+    make_parallel_state()
+    config = make_train_parallel_config(dp_size=dp_size, supports_precomputed_schedule=True)
+    gradients: dict[int, torch.Tensor] = {}
+    for shard in split_train_data_by_dp_scheduled_raw(args, copy.deepcopy(data), train_parallel_config=config):
+        log_probs = [torch.zeros(n, dtype=torch.float64, requires_grad=True) for n in shard["response_lengths"]]
+        per_token = torch.cat([-advantage * lp for advantage, lp in zip(shard["rewards"], log_probs, strict=True)])
+        reduce = get_sum_of_sample_mean(
+            shard["total_lengths"],
+            shard["response_lengths"],
+            [torch.tensor(mask, dtype=torch.float64) for mask in shard["loss_masks"]],
+            denominators=[torch.tensor(total, dtype=torch.float64) for total in shard["rollout_mask_sums"]],
+        )
+        (reduce(per_token) / shard["num_rollouts"][0]).backward()
+        gradients |= {index: lp.grad for index, lp in zip(shard["sample_indices"], log_probs, strict=True)}
+    return gradients
+
+
+class TestSkipKeepsTheGradient:
+    @pytest.mark.parametrize("length_reference", [None, 16384])
+    def test_skipping_zero_advantage_rollouts_leaves_every_gradient_as_it_was(self, length_reference):
+        samples = _multi_turn_batch()
+        knobs = dict(
+            global_batch_size=16,
+            n_samples_per_prompt=4,
+            use_dynamic_batch_size=True,
+            max_tokens_per_gpu=10_000,
+            advantage_estimator="grpo",
+            rewards_normalization=True,
+            grpo_sqrt_length_reference=length_reference,
+        )
+        data = convert_samples_to_train_data(
+            make_args(**knobs),
+            samples,
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+        every = _surrogate_gradients(make_args(skip_zero_advantage_samples=False, **knobs), data, dp_size=2)
+        skipping = _surrogate_gradients(make_args(skip_zero_advantage_samples=True, **knobs), data, dp_size=2)
+
+        assert len(every) == len(samples) > len(skipping)
+        for index, gradient in every.items():
+            assert torch.allclose(skipping.get(index, torch.zeros_like(gradient)), gradient, atol=1e-12)
+        assert any(gradient.abs().sum() > 0 for gradient in skipping.values())
